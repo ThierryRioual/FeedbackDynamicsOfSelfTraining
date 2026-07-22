@@ -8,12 +8,20 @@ def validate_self_training_data(
         X_test: np.ndarray = None, Y_test: np.ndarray = None
         ) -> tuple[int, int, int, Optional[int]]:
     """
-    Validate the shapes of labeled, unlabeled, and test arrays and return
-    the key counts (N, M, N_test, d).
+    Validate the shapes, types, and finiteness of labeled, unlabeled, and test arrays 
+    and return the key counts (N, M, N_test, d).
     """
     assert isinstance(X_lab, np.ndarray), "X_lab must be a numpy array."
     assert isinstance(X_unl, np.ndarray), "X_unl must be a numpy array."
     assert isinstance(Y_lab, np.ndarray), "Y_lab must be a numpy array."
+
+    assert np.all(np.isfinite(X_lab)), "X_lab contains NaN or Inf values."
+    assert np.all(np.isfinite(X_unl)), "X_unl contains NaN or Inf values."
+    assert np.all(np.isfinite(Y_lab)), "Y_lab contains NaN or Inf values."
+
+    assert X_lab.dtype == np.float64, f"X_lab must be float64, got {X_lab.dtype}."
+    assert X_unl.dtype == np.float64, f"X_unl must be float64, got {X_unl.dtype}."
+    assert Y_lab.dtype == np.float64, f"Y_lab must be float64, got {Y_lab.dtype}."
 
     assert X_lab.ndim == 2, "X_lab must be a 2D array."
     assert X_unl.ndim == 2, "X_unl must be a 2D array."
@@ -30,10 +38,14 @@ def validate_self_training_data(
     assert (X_test is None) == (Y_test is None), "X_test and Y_test must be provided together."
     assert X_test is None or isinstance(X_test, np.ndarray), "X_test must be a numpy array when provided."
     assert Y_test is None or isinstance(Y_test, np.ndarray), "Y_test must be a numpy array when provided."
-    assert X_test is None or X_test.ndim == 2, "X_test must be a 2D array when provided."
-    assert Y_test is None or Y_test.ndim == 1, "Y_test must be a 1D array when provided."
-    assert X_test is None or X_test.shape[1] == d, "X_test must have the same number of features as X_lab and X_unl."
-    assert X_test is None or Y_test is None or Y_test.shape[0] == X_test.shape[0], "Number of test samples must match number of test labels."
+    
+    if X_test is not None:
+        assert X_test.dtype == np.float64, f"X_test must be float64, got {X_test.dtype}."
+        assert np.all(np.isfinite(X_test)), "X_test contains NaN or Inf values from DGP."
+        assert X_test.ndim == 2, "X_test must be a 2D array when provided."
+        assert Y_test.ndim == 1, "Y_test must be a 1D array when provided."
+        assert X_test.shape[1] == d, "X_test must have the same number of features as X_lab and X_unl."
+        assert Y_test.shape[0] == X_test.shape[0], "Number of test samples must match number of test labels."
 
     N_test = None if X_test is None else X_test.shape[0]
     return N, M, d, N_test
@@ -70,3 +82,18 @@ def validate_dgp_parameters(
 
     return V
 
+def validate_gradient_step(t: int, weights: np.ndarray, grad: np.ndarray) -> None:
+    """
+    Validates numerical integrity during the optimization step.
+    """
+    if not np.all(np.isfinite(grad)):
+        bias_weight = weights[0]
+        feature_weights_max = np.nanmax(np.abs(weights[1:])) if len(weights) > 1 else np.nan
+        grad_bias = grad[0]
+        grad_features_max = np.nanmax(np.abs(grad[1:])) if len(grad) > 1 else np.nan
+        
+        raise ValueError(
+            f"Gradient divergence at iteration {t}.\n"
+            f"w_0: {bias_weight}, Max w_j: {feature_weights_max}\n"
+            f"grad_0: {grad_bias}, Max grad_j: {grad_features_max}"
+        )

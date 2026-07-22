@@ -5,13 +5,13 @@ from scipy.special import expit
 
 class LossFunction(ABC):
     @abstractmethod
-    def evaluate(self, w: np.ndarray, X: np.ndarray, y: np.ndarray) -> float:
-        """Returns the empirical risk L(w)."""
+    def evaluate(self, r: np.ndarray, y: np.ndarray) -> float:
+        """Returns the empirical risk L(r)/N."""
         pass
 
     @abstractmethod
-    def gradient(self, w: np.ndarray, X: np.ndarray, y: np.ndarray) -> np.ndarray:
-        """Returns the gradient vector \nabla L(w)."""
+    def gradient(self, r: np.ndarray, y: np.ndarray) -> np.ndarray:
+        """Returns the gradient vector \nabla L(r)/N."""
         pass
 
 class Penalty(ABC):
@@ -25,19 +25,17 @@ class Penalty(ABC):
         """Returns the subgradient/gradient vector \nabla R(w)."""
         pass
 
-
 class LogisticLoss(LossFunction):
-    def evaluate(self, w: np.ndarray, X: np.ndarray, y: np.ndarray) -> float:
-        n = X.shape[0]
-        margins = y * (X @ w)
+    def evaluate(self, r: np.ndarray, y: np.ndarray) -> float:
+        margins = y * r
         # Using numerically stable log-add-exp formulation
-        return np.sum(np.logaddexp(0, -margins)) / n
+        return np.sum(np.logaddexp(0, -margins)) 
 
-    def gradient(self, w: np.ndarray, X: np.ndarray, y: np.ndarray) -> np.ndarray:
-        n = X.shape[0]
-        margins = y * (X @ w)
+    def gradient(self, r: np.ndarray, y: np.ndarray) -> np.ndarray:
+        margins = y * r
         probabilities = expit(-margins) # Equivalent to 1 / (1 + exp(margins))
-        return -(1/n) * X.T @ (y * probabilities)
+        grad = - y * probabilities
+        return grad
 
 class RidgePenalty(Penalty):
     def evaluate(self, w: np.ndarray) -> float:

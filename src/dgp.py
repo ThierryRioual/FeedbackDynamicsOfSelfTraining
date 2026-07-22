@@ -2,7 +2,7 @@ import numpy as np
 from dataclasses import dataclass, field
 from typing import Tuple
 
-import validation
+from src.validation import validate_dgp_parameters
 
 @dataclass
 class SpikedIsotropic:
@@ -31,7 +31,7 @@ class SpikedIsotropic:
         if self.spikes_vect is None:
             self.spikes_vect = np.zeros((self.d, self.s))
 
-        self.V = validation.validate_dgp_parameters(
+        self.V = validate_dgp_parameters(
             self.d, self.s, self.spikes_val, self.spikes_vect, self.mu, self.sigma, self.p
         )
 
