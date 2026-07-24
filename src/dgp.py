@@ -1,6 +1,6 @@
-import numpy as np
+import torch
 from dataclasses import dataclass, field
-from typing import Tuple
+from typing import Tuple, List, Optional
 
 from src.validation import validate_dgp_parameters
 
@@ -12,79 +12,87 @@ class SpikedIsotropic:
     """
 
     d: int
-    mu: np.ndarray 
+    mu: torch.Tensor 
     sigma: float
     p: float
     seed: int
     s: int = 0 # Number of spikes
-    spikes_val: list = field(default_factory=list)
-    spikes_vect: np.ndarray = field(init=False, default=None)  # Will be initialized in __post_init__
-    rng: np.random.Generator = field(init=False)
-    V: np.ndarray = field(init=False)
-    Lambda_sqrt: np.ndarray = field(init=False)
+    spikes_val: List[float] = field(default_factory=list)
+    spikes_vect: Optional[torch.Tensor] = field(init=False, default=None)  # Will be initialized in __post_init__
+    rng: torch.Generator = field(init=False)
+    V: torch.Tensor = field(init=False)
+    Lambda_sqrt: torch.Tensor = field(init=False)
 
     def __post_init__(self):
         """
         Initializes the spiked isotropic distribution.
-        Validates the parameters and sets up the random number generator.
+        Validates the parameters and sets up the PyTorch random number generator.
         """
         if self.spikes_vect is None:
-            self.spikes_vect = np.zeros((self.d, self.s))
+            self.spikes_vect = torch.zeros((self.d, self.s), dtype=torch.float64)
 
         self.V = validate_dgp_parameters(
             self.d, self.s, self.spikes_val, self.spikes_vect, self.mu, self.sigma, self.p
         )
 
-        self.rng = np.random.default_rng(self.seed)
-        self.Lambda_sqrt = np.diag(np.sqrt(np.asarray(self.spikes_val, dtype=float)))
+        # Initialize the isolated PyTorch random number generator
+        self.rng = torch.Generator().manual_seed(self.seed)
+        
+        # Setup Lambda_sqrt
+        spikes_val_t = torch.as_tensor(self.spikes_val, dtype=torch.float64)
+        self.Lambda_sqrt = torch.diag(torch.sqrt(spikes_val_t))
     
-    def _sample_class(self, n_samples: int, sign: int) -> np.ndarray:
+    def _sample_class(self, n_samples: int, sign: int) -> torch.Tensor:
         """
         Samples from the spiked isotropic distribution for a given class label.
         """
-
-        Z = self.rng.standard_normal((n_samples, self.d))
-        W = self.rng.standard_normal((n_samples, self.s))
+        # torch.randn takes the generator parameter to ensure reproducibility
+        Z = torch.randn((n_samples, self.d), generator=self.rng, dtype=torch.float64)
+        W = torch.randn((n_samples, self.s), generator=self.rng, dtype=torch.float64)
         
         # Construct signal
         signal = sign * self.mu
         
-        # Construct noise
+        # Construct noise (Matrix multiplication @ works natively in PyTorch)
         isotropic_noise = self.sigma * Z
         spiked_noise = W @ self.Lambda_sqrt @ self.V.T
         
         return signal + isotropic_noise + spiked_noise
  
-    def sample(self, N: int, M: int, N_test: int) -> Tuple[np.ndarray, ...]:
+    def sample(self, N: int, M: int, N_test: int) -> Tuple[torch.Tensor, ...]:
         """
         Samples labeled, unlabeled, and test datasets from the spiked isotropic distribution.
         """
 
-        n_pos_lab = self.rng.binomial(N, self.p)
+        # PyTorch equivalent of np.random.binomial that respects the isolated generator
+        n_pos_lab = int((torch.rand(N, generator=self.rng) < self.p).sum().item())
         n_neg_lab = N - n_pos_lab
-        m_pos_unl = self.rng.binomial(M, self.p)
+        
+        m_pos_unl = int((torch.rand(M, generator=self.rng) < self.p).sum().item())
         m_neg_unl = M - m_pos_unl
-        n_pos_test = self.rng.binomial(N_test, self.p)
+        
+        n_pos_test = int((torch.rand(N_test, generator=self.rng) < self.p).sum().item())
         n_neg_test = N_test - n_pos_test
 
         X_pos_lab = self._sample_class(n_pos_lab, sign=1)
         X_neg_lab = self._sample_class(n_neg_lab, sign=-1)
-        X_lab = np.vstack([X_pos_lab, X_neg_lab])
-        Y_lab = np.concatenate([np.ones(n_pos_lab), -np.ones(n_neg_lab)])
+        X_lab = torch.vstack([X_pos_lab, X_neg_lab])
+        Y_lab = torch.cat([torch.ones(n_pos_lab, dtype=torch.float64), -torch.ones(n_neg_lab, dtype=torch.float64)])
 
         X_pos_unl = self._sample_class(m_pos_unl, sign=1)
         X_neg_unl = self._sample_class(m_neg_unl, sign=-1)
-        X_unl = np.vstack([X_pos_unl, X_neg_unl])
-        Y_unl = np.concatenate([np.ones(m_pos_unl), -np.ones(m_neg_unl)])
+        X_unl = torch.vstack([X_pos_unl, X_neg_unl])
+        Y_unl = torch.cat([torch.ones(m_pos_unl, dtype=torch.float64), -torch.ones(m_neg_unl, dtype=torch.float64)])
 
         X_pos_test = self._sample_class(n_pos_test, sign=1)
         X_neg_test = self._sample_class(n_neg_test, sign=-1)
-        X_test = np.vstack([X_pos_test, X_neg_test])
-        Y_test = np.concatenate([np.ones(n_pos_test), -np.ones(n_neg_test)])
+        X_test = torch.vstack([X_pos_test, X_neg_test])
+        Y_test = torch.cat([torch.ones(n_pos_test, dtype=torch.float64), -torch.ones(n_neg_test, dtype=torch.float64)])
 
-        shuffled_idx_lab = self.rng.permutation(N)
-        shuffled_idx_unl = self.rng.permutation(M)
-        shuffled_idx_test = self.rng.permutation(N_test)
+        # PyTorch equivalent of np.random.permutation
+        shuffled_idx_lab = torch.randperm(N, generator=self.rng)
+        shuffled_idx_unl = torch.randperm(M, generator=self.rng)
+        shuffled_idx_test = torch.randperm(N_test, generator=self.rng)
 
         return (
             X_lab[shuffled_idx_lab], 

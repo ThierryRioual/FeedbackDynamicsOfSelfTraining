@@ -1,4 +1,4 @@
-import numpy as np
+import torch
 from dataclasses import dataclass, field
 from typing import Dict, List, Any, Type, Optional, Set
 
@@ -24,7 +24,7 @@ class MonteCarloExperiment:
     metrics: Set[str] = field(default_factory=lambda: {"test_error"})
     
     # State variables excluded from the constructor argument list
-    results_: Optional[Dict[str, np.ndarray]] = field(init=False, default=None)
+    results_: Optional[Dict[str, torch.Tensor]] = field(init=False, default=None)
     sweep_param_name_: Optional[str] = field(init=False, default=None)
     sweep_param_values_: Optional[List[Any]] = field(init=False, default=None)
 
@@ -39,7 +39,7 @@ class MonteCarloExperiment:
         seeds: List[int],
         sweep_param_name: Optional[str] = None, 
         sweep_param_values: Optional[List[Any]] = None
-    ) -> Dict[str, np.ndarray]:
+    ) -> None:
         """Executes the Monte Carlo simulation and stores the result internally."""
 
         d = self.data_gen.d  # Dimensionality of the feature space
@@ -53,16 +53,23 @@ class MonteCarloExperiment:
         
         length = len(values_to_test)
         runs = len(seeds)
-        res = {metric: np.zeros((length, runs, self.T + 1)) for metric in self.metrics}
+        
+        # Initialize results as a dictionary of 3D PyTorch tensors
+        res = {
+            metric: torch.zeros((length, runs, self.T + 1), dtype=torch.float64) 
+            for metric in self.metrics
+        }
 
         for j, current_seed in enumerate(seeds):
 
-            rng = np.random.default_rng(current_seed)
+            # Initialize the isolated PyTorch generator
+            rng = torch.Generator().manual_seed(current_seed)
             self.data_gen.rng = rng
 
             X_lab, Y_lab, X_unl, Y_unl, X_test, Y_test = self.data_gen.sample(self.N, self.M, self.N_test)
 
-            w0 = rng.normal(0, 1 , size=d)
+            # Generate initial weights using PyTorch
+            w0 = torch.randn(d, generator=rng, dtype=torch.float64)
             
             for i, val in enumerate(values_to_test):
                 current_params = self.base_params.copy()
@@ -76,17 +83,20 @@ class MonteCarloExperiment:
                     X_lab=X_lab, Y_lab=Y_lab,
                     X_unl=X_unl, Y_unl=Y_unl,
                     X_test=X_test, Y_test=Y_test,
+                    mu=self.data_gen.mu, # Pass mu for alignment metrics!
                     metrics=self.metrics
                 )
                 
                 experiment = self.algorithm(**current_params, callback=callback)
-                experiment.fit(X_lab, Y_lab, X_unl, initial_weights=w0.copy())
+                
+                # Use .clone() instead of .copy() for PyTorch tensors
+                experiment.fit(X_lab, Y_lab, X_unl, initial_weights=w0.clone())
                 
                 for metric in self.metrics:
-                    res[metric][i, j, :] = callback.history_[metric]
+                    # Convert the list of python floats back into a 1D tensor and assign
+                    res[metric][i, j, :] = torch.tensor(callback.history_[metric], dtype=torch.float64)
 
         self.results_ = res
-        return None
 
     def plot_trajectories(self, metric: str = "test_error") -> None:
         """Delegates the visualization of stored results to the plotting module."""

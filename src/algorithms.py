@@ -1,6 +1,5 @@
-from numpy.random import bit_generator
-import subprocess
-import numpy as np
+import torch
+
 from dataclasses import dataclass, field
 from typing import List, Callable, Optional, Tuple
 
@@ -27,30 +26,29 @@ class SelfTrainedGradientDescent:
     penalty_function: Penalty = field(default_factory=RidgePenalty)
 
     bias: float = field(init=False, default=None) # b
-    weights: np.ndarray = field(init=False, default=None) # w
+    weights: torch.Tensor = field(init=False, default=None) # w
     callback: Optional[Callable[['SelfTrainedGradientDescent'], float]] = None
 
-    prev_scores_: np.ndarray = field(init=False, default=None)  
+    prev_scores_: torch.Tensor = field(init=False, default=None)  
     # Tracks which unlabeled samples are used for pseudo-labeling
 
     @property
-    def pseudo_label_param_schedule(self) -> np.ndarray:
+    def pseudo_label_param_schedule(self) -> torch.Tensor:
         """
         Precompute the schedule for pseudo-labeling
         """
-        func = lambda t: self.pseudo_label_param * (t - self.ramp_start) / (self.ramp_end - self.ramp_start) \
-            if self.ramp_start <= t < self.ramp_end else \
-            (0.0 if t < self.ramp_start else self.pseudo_label_param)  
-        vfunc = np.vectorize(func)
-        return vfunc(np.arange(self.n_iterations))                
+        t = torch.arange(self.n_iterations)
+        t_clamped = torch.clamp(t, min=self.ramp_start, max=self.ramp_end)
+        schedule = self.pseudo_label_param * (t_clamped - self.ramp_start) / (self.ramp_end - self.ramp_start)
+        return schedule             
 
     def _compute_empirical_risk_gradient(self, 
-                          scores_lab: np.ndarray, 
-                          Y_lab: np.ndarray,
-                          scores_unl: np.ndarray, 
-                          alpha: float) -> np.ndarray:
+                          scores_lab: torch.Tensor, 
+                          Y_lab: torch.Tensor,
+                          scores_unl: torch.Tensor, 
+                          alpha: float) -> torch.Tensor:
         """
-        Computes the empirical risk of the self-training algorithm. (\nabla R vector)
+        Computes the empirical risk of the self-training algorithm. ($\nabla R$ vector)
         """
         
         # Compute gradient from labeled data
@@ -59,59 +57,59 @@ class SelfTrainedGradientDescent:
 
         # Compute gradient from pseudo-labeled unlabeled data
         n_unl = scores_unl.shape[0]
-        mask = np.abs(scores_unl) >= self.margin_threshold
+        mask = torch.abs(scores_unl) >= self.margin_threshold
         n_psd = mask.sum()
-        Y_psd = np.where(scores_unl >= 0, 1, -1)
+        Y_psd = torch.where(scores_unl >= 0, 1, -1)
         if n_psd > 0:
             grad_unl = self.loss_function.gradient(scores_unl, Y_psd) * mask / n_psd
         else:
-            grad_unl = np.zeros_like(scores_unl)
+            grad_unl = torch.zeros_like(scores_unl)
 
         self.prev_scores_ = scores_unl
 
         n_total = n_lab + n_unl 
 
-        return n_total * np.concatenate([grad_lab, alpha * grad_unl])
+        return n_total * torch.concatenate([grad_lab, alpha * grad_unl])
 
 
-    def _compute_gradient(self, bias: Optional[float], weights: np.ndarray, 
-                          X_lab: np.ndarray, 
-                          Y_lab: np.ndarray,
-                          X_unl: np.ndarray, 
-                          alpha: float) -> Tuple[float, np.ndarray]:
+    def _compute_gradient(self, bias: Optional[float], weights: torch.Tensor, 
+                          X_lab: torch.Tensor, 
+                          Y_lab: torch.Tensor,
+                          X_unl: torch.Tensor, 
+                          alpha: float) -> Tuple[float, torch.Tensor]:
         """
         Computes the gradient of the loss function with respect to model parameters weights.
         This includes contributions from labeled data, pseudo-labeled unlabeled data, and regularization.
-        ( 1^\top \nabla R(r) / n, \sqrt{d}/n * X^\top \nabla R(r) + \lambda \nabla P(w) ) 
+        ($$ 1^\top \nabla R(r) / n, \sqrt{d}/n * X^\top \nabla R(r) + \lambda \nabla P(w) $$) 
         """
 
         bias = bias if bias is not None else 0
 
-        d = weights.shape[0]
-        n = X_lab.shape[0] + X_unl.shape[0]
+        d = torch.tensor(weights.shape[0])
+        n = torch.tensor(X_lab.shape[0] + X_unl.shape[0])
 
-        scores_lab = (X_lab @ weights) / np.sqrt(d) + bias
-        scores_unl = (X_unl @ weights) / np.sqrt(d) + bias
+        scores_lab = (X_lab @ weights) / torch.sqrt(d) + bias
+        scores_unl = (X_unl @ weights) / torch.sqrt(d) + bias
 
         emp_risk = self._compute_empirical_risk_gradient(scores_lab, Y_lab, scores_unl, alpha) # \nabla R
 
-        X_total = np.concatenate([X_lab, X_unl])
+        X_total = torch.concatenate([X_lab, X_unl])
 
         # Compute gradient of penalty term
         grad_pen = self.penalty_function.gradient(weights)
 
-        return np.average(emp_risk), (np.sqrt(d) / n) * (X_total.T @ emp_risk) + self.penalty_param * grad_pen
+        return torch.mean(emp_risk), (torch.sqrt(d) / n) * (X_total.T @ emp_risk) + self.penalty_param * grad_pen
 
-    def fit(self, X_lab: np.ndarray, Y_lab: np.ndarray, X_unl: np.ndarray, 
-            initial_bias: Optional[float] = None, initial_weights: Optional[np.ndarray] = None) -> List[float]:
+    def fit(self, X_lab: torch.Tensor, Y_lab: torch.Tensor, X_unl: torch.Tensor, 
+            initial_bias: Optional[float] = None, initial_weights: Optional[torch.Tensor] = None) -> List[float]:
         """
         Fits the self-training model to the provided labeled and unlabeled data.
         """
         N, M, d, _ = validate_self_training_data(X_lab, Y_lab, X_unl)
 
         assert (self.include_bias) or (initial_bias is None), "Cannot initialize inital bias when inlcude_bias is set to False"
-        self.bias = initial_bias if initial_bias is not None else 0
-        self.weights = initial_weights if initial_weights is not None else np.random.normal(0, 1, size=d) 
+        self.bias = initial_bias if initial_bias is not None else 0.0
+        self.weights = initial_weights if initial_weights is not None else torch.normal(mean=0.0, std=1.0, size=(d,)) 
 
         if self.callback is not None:
             self.callback(self)
@@ -135,7 +133,7 @@ class SelfTrainedGradientDescent:
 
         return self.bias, self.weights
     
-    def score(self, X: np.ndarray, bias: Optional[float] = None, weights: Optional[np.ndarray] = None) -> np.ndarray:
+    def score(self, X: torch.Tensor, bias: Optional[float] = None, weights: Optional[torch.Tensor] = None) -> torch.Tensor:
         """
         Computes the raw scores (logits) for the given input data X using the learned weights.
         If weights are not provided, it uses the model's current weights.
@@ -146,14 +144,14 @@ class SelfTrainedGradientDescent:
             bias = self.bias if (self.include_bias and self.bias is not None) else 0
 
         weights = weights if weights is not None else self.weights
-        d = weights.shape[0]
+        d = torch.tensor(weights.shape[0])
 
-        return (X @ weights) / np.sqrt(d) + bias
+        return (X @ weights) / torch.sqrt(d) + bias
         
-    def predict(self, X: np.ndarray, bias: Optional[float] = None, weights: Optional[np.ndarray] = None) -> np.ndarray:
+    def predict(self, X: torch.Tensor, bias: Optional[float] = None, weights: Optional[torch.Tensor] = None) -> torch.Tensor:
         """
         Predicts the labels for the given input data X using the learned weights.
         If weights are not provided, it uses the model's current weights.
         """
         assert (self.include_bias) or (bias is None), "Cannot include bias when inlcude_bias is set to False"
-        return np.where(self.score(X, bias, weights) >= 0, 1, -1)
+        return torch.where(self.score(X, bias, weights) >= 0, 1, -1)

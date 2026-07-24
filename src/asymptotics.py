@@ -1,146 +1,279 @@
-import numpy as np
-from dataclasses import dataclass, field
-from typing import Optional, List, Dict, Set
+import torch
 
-from src.dgp import SpikedIsotropic
-from src.algorithms import SelfTrainedGradientDescent
+from dataclasses import dataclass, field
+from typing import Optional, Callable, Tuple, List, Dict, Set
+
 
 @dataclass
-class StateEvolutionDynamics:
+class MacroscopicStateEvolution:
     """
-    Tracks the evolution of the state variables (e.g., errors, usage rates) over iterations.
-    This class is designed to store and update the state variables for each iteration of the algorithm.
+    Numerically integrate the state evolution equations and compute the deterministic theoretical limits using Monte Carlo averaging.
     """
-    dgp: SpikedIsotropic
-    learner: SelfTrainedGradientDescent
-    
-    n_labeled: int # N
-    n_unlabeled: int # M
-    n_total: int = field(init=False) # n
+    # Initialization paramters
 
-    rng: np.random.Generator = field(init=False)
+    sample_to_dimension_ratio: float
+    signal_prior: Callable[[int], torch.Tensor]
+    label_prior: float 
 
-    initial_weights: Optional[np.ndarray] = None # w_0
-    signal_: np.ndarray = field(init=False) # mu
-    labels_: np.ndarray = field(init=False)
+    score_function: Callable[[torch.Tensor], torch.Tensor]
+    penalty_gradient: Callable[[torch.Tensor], torch.Tensor]
 
-    weights_: List[np.ndarray] = field(init=False, default=list) # w
-    weights_increments_: List[np.ndarray] = field(init=False, default=list) # v
-    predictions_: List[np.ndarray] =field(init=False, default=list) # r
+    mc_seed: int = field(default=42) # monte carlo seed
+    K: int = field(default=1000) # number of monte carlo samples
 
-    signal_weights_alignments_: List[float] = field(init=False, default=list) # m
-    labels_scores_covariances_: List[float] = field(init=False, default=list) # chi
+    inital_bias: float = field(default=0) # b_{init}
+    initial_weight: torch.Tensor = field(default=None) # w_{init}
 
-    weights_covariance_: np.ndarray = field(init=False) # C_w
-    scores_covariance_: np.ndarray = field(init=False) # C_g
-    weights_memory_: np.ndarray = field(init=False) # Gamma_w
-    scores_memory_: np.ndarray = field(init=False) # Gamma_g
+    # Instance variables
 
-    n_interations_: int = field(init=False) # T
+    signal: torch.Tensor = field(init=False)
+    label: torch.Tensor = field(init=False)
+
+    bias: List[torch.Tensor] = field(init=False) # b 
+    weight: List[torch.Tensor] = field(init=False) # w
+
+    prediction: List[torch.Tensor] = field(init=False) # r
+    score: List[torch.Tensor] = field(init=False) # g
+
+    weight_memory: List[torch.Tensor] = field(init=False) # \gamma^{[w]}
+    score_memory: List[torch.Tensor] = field(init=False) # \gamma^{[g]}
+
+    weight_signal_alignments: List[torch.Tensor] = field(init=False) # m
+    score_label_alignments: List[torch.Tensor] = field(init=False) # \chi
+    expected_score: List[torch.Tensor] = field(init=False) # \zeta
 
     def __post_init__(self):
         """
+        Initialize the state evolution.
         """
-        self.rng = self.dgp.rng.copy()
+        torch.manual_seed(self.mc_seed)
 
-        self.n_total - self.n_labeled + self.n_unlabeled
-        self.signal_ = self.dgp.mu.copy()
-        self.labels_ = self.rng.binomial(self.n_total, self.dgp.p)
-        self.n_iterations_ = self.learner.n_iterations
-    
-        d = self.dgp.d  # Assuming dgp has dimension attribute
-        T = self.n_iterations_
-    
-        # Pre-allocate arrays (shape: dimension x time)
-        self.weights_ = np.zeros((d, T + 1))
-        self.weights_increment_ = np.zeros((d, T + 1))
-        self.predictions_ = np.zeros((d, T + 1))
+        self.signal = self.signal_prior(self.K)
+        self.label = (torch.rand(self.K) < self.label_prior).float() * 2 - 1 # transform to {+1, -1}
 
-        self.signal_weights_alignments_ = np.zeros(T + 1)
-        self.labels_scores_covariance_ = np.zeros(T + 1)
+        self.initial_bias = torch.tensor(self.initial_bias, requires_grad=True)
 
-        # Covariance matrices (shape: time x time)
-        self.weight_covariance_ = np.zeros((T + 1, T + 1))
-        self.score_covariance_ = np.zeros((T + 1, T + 1))
-        self.weight_memory_ = np.zeros((T + 1, T + 1))
-        self.score_memory_ = np.zeros((T + 1, T + 1))
-    
-        # Set initial conditions
-        if self.initial_weights is not None:
-            self.weights_[:, 0] = self.initial_weights
+        if self.initial_weight is None:
+            self.initial_weight = torch.randn(self.K, requires_grad=True)
         else:
-            self.weights_[:, 0] = self.learner.weights
+            self.initial_weight = torch.tensor(self.initial_weight, requires_grad=True)
 
+        self.bias = [self.initial_bias]
+        self.weight = [self.initial_weight]
+
+        self.prediction = []
+        self.score = []
+
+        self.forward_noise = []
+        self.backward_noise = []
+
+        self.weight_memory = []
+        self.score_memory = []
+
+        self.weight_signal_alignments = []
+        self.score_label_alignments = []
+        self.expected_score = []
+
+    def forward_pass(self):   
+        """
+        Performs the forward pass of the self-training algorithm.
+        """
+        gamma = self.compute_weight_memory() # \gamma^{[w]}
+        m = self.compute_weight_signal_alignment() # m
+        omega = self.compute_forward_noise() # \omega
+
+        G = torch.stack(self.score[:-1], dim=1) # G_{t-1}
+        b = self.bias[-1] # b_{t}
+
+        r = b * torch.ones(self.K) + m * self.label + G @ gamma + omega # r^{t}
+        g = self.score_function(r) # g^{t}
+
+        self.prediction.append(r) # r
+        self.score.append(g) # g
+
+        return r, g
+
+    def backward_pass(self):
+        """
+        Performs the backward pass of the self-training algorithm.
+        """
+        gamma = self.compute_score_memory() # \gamma^{[g]}
+        chi = self.compute_score_label_alignment() # \chi
+        zeta = self.compute_expected_score() # \zeta
+        xi = self.compute_backward_noise() # \xi
+
+        prev_b = self.bias[-1]
+        prev_w = self.weight[-1]
+
+        W = torch.stack(self.score, dim=1) # W_{t}
+        h = self.penalty_gradient(prev_w) # h
+
+        b = prev_b + zeta # g^{t}
+        w = prev_w + h + chi * self.signal + W @ gamma + xi # r^{t}
+
+        self.bias.append(b) # g
+        self.weight.append(w) # r
+
+        return b, w
+
+    @property
+    def weight_grammian(self) -> torch.Tensor:
+        """
+        Computes the weight Gram matrix ($$ C^{[w]} $$)
+        """
+        W = torch.stack(self.weight, dim=1)
+        return W.T @ W / self.K
+    
+    @property
+    def score_grammian(self) -> torch.Tensor:
+        """
+        Computes the score Gram matrix ($$ C^{[g]} $$)
+        """
+        G = torch.stack(self.score, dim=1)
+        return G.T @ G / self.K
+    
+    def compute_weight_memory(self) ->torch.Tensor:
+        """
+        Computes the weight memory vector ($$ \gamma^{[w]} $$)
+        """
+        current_weight = self.weight[-1] # w^t
+        backward_noise_matrix = torch.stack(self.backward_noise[:-1], dim=0) # \Xi_{t-1}
+
+        derivatives = torch.autograd.grad(
+            outputs=current_weight,
+            inputs=backward_noise_matrix,
+            grad_outputs=torch.ones_like(current_weight),
+            retain_graph=True
+        )
+
+        gamma = torch.tensor([torch.mean(dw).item() for dw in derivatives])
+        self.weight_memory.append(gamma)
+
+        return gamma
+
+    def compute_score_memory(self) -> torch.Tensor:
+        """
+        Computes the score memory vector ($$ \gamma^{[g]} $$)
+        """
+        current_score = self.score[-1] # g^t
+        forward_noise_matrix = torch.stack(self.forward_noise, dim=0) # \Omega_{t}
+
+        derivatives = torch.autograd.grad(
+            outputs=current_score,
+            inputs=forward_noise_matrix,
+            grad_outputs=torch.ones_like(current_score),
+            retain_graph=True
+        )
+
+        gamma = torch.tensor([torch.mean(dg).item() for dg in derivatives])
+        self.score_memory.append(gamma)
+
+        return gamma
+
+    def compute_weight_signal_alignment(self) -> torch.Tensor:
+        """
+        Computes the weight-signal alignment vector ($$ m $$)
+        """
+        w = self.weight[-1] # w^t
+        mu = self.signal
+        m = torch.dot(w, mu) / self.K
+        self.weight_signal_alignments.append(m)
+        return m
+
+    def compute_score_label_alignment(self) -> torch.Tensor:
+        """
+        Computes the score-label alignment vector ($$ \chi $$)
+        """
+        g = self.score[-1] # g^t
+        y = self.label
+        chi = torch.dot(g, y) / self.K
+        self.score_label_alignments.append(chi)
+        return chi
+
+    def compute_expected_score(self) -> torch.Tensor:
+        """
+        Computes the expected scores ($$ \zeta $$)
+        """
+        g = self.score[-1] # g^t
+        ones_vec = torch.ones(self.K)
+        zeta = torch.dot(g, ones_vec) / self.K
+        self.expected_score.append(zeta)
+        return zeta    
 
     @staticmethod
-    def _compute_projection_coef(X, x):
+    def _compute_projection_coef(X: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
         """
-        Computes the OLS projection coefficients using SVD.
+        Computes the projection coefficients of x onto the span of X.
+        ($$ X^\dagger x $$)
         """
-        # np.linalg.lstsq returns a tuple; the first element contains the solution
-        coefficients, _, _, _ = np.linalg.lstsq(X, x, rcond=None)
-        return coefficients
+        return torch.linalg.lstsq(X, x).solution
 
+    def compute_forward_projection_coef(self) -> torch.Tensor:
+        r"""
+        Computes the forward projection coefficients ($$ \alpha^t $$).
+        """
+        W = torch.stack(self.weight[:-1], dim=1)
+        v = self.weight[-1] - self.weight[-2] if len(self.weight) > 1 else self.weight[-1]
+        return self._compute_projection_coef(W, v)
 
-    def _compute_v(self, h, chi, W, Gamma_g, xi):
-        return h + self.signal * chi / np.sqrt(self.d) + W @ Gamma_g + xi
+    def compute_backward_projection_coef(self) -> torch.Tensor:
+        r"""
+        Computes the backward projection coefficients ($$ \beta^t $$).
+        """
+        G = torch.stack(self.score[:-1], dim=1)
+        g = self.score[-1]
+        return self._compute_projection_coef(G, g)
     
-    def _compute_r(self, Y, m, G, Gamma_w, omega):
-        return m * self.labels_ + G @ Gamma_w + omega
-    
+    def compute_forward_noise_variance(self) -> torch.Tensor:
+        r"""
+        Computes the forward noise variance ($$ \vartheta^{[w]} $$).
+        """
+        W = torch.stack(self.weight[:-1], dim=1)
+        v = self.weight[-1] - self.weight[-2] if len(self.weight) > 1 else self.weight[-1]
+        alpha = self.compute_forward_projection_coef()
+        residual = v - W @ alpha
+        return torch.square(residual).mean()
 
-    @staticmethod
-    def compute_conditional_variance(cov_matrix: np.ndarray, t: int) -> float:
+    def compute_backward_noise_variance(self) -> torch.Tensor:
+        r"""
+        Computes the backward noise variance ($$ \vartheta^{[g]} $$).
         """
-        Computes the Schur complement for the conditional variance at time t.
-        cov_matrix: The (t+1) x (t+1) empirical covariance matrix.
+        G = torch.stack(self.score[:-1], dim=1)
+        g = self.score[-1]
+        beta = self.compute_backward_projection_coef()
+        residual = g - G @ beta
+        return torch.square(residual).mean()
+
+    def compute_forward_noise(self) -> torch.Tensor:
+        r"""
+        Computes the forward gaussian noise ($$ \omega^{t} $$).
         """
-        if t == 0:
-            return cov_matrix[0, 0]
+        variance = self.compute_forward_noise_variance()
+        innovation = torch.sqrt(variance) * torch.randn(self.K, device=self.device, dtype=self.dtype)
+        
+        Omega = torch.stack(self.forward_noise[:-1], dim=0)
+        alpha = self.compute_forward_projection_coef()
+
+        omega = Omega @ alpha + self.forward_noise[:-1] + innovation
+        self.forward_noise.append(omega)
+
+        return omega
+
+    def compute_backward_noise(self) -> torch.Tensor:
+        r"""
+        Computes the backward gaussian noise ($$ \xi^{t} $$).
+        """
+        variance = self.compute_backward_noise_variance()
+        innovation = torch.sqrt(variance) * torch.randn(self.K, device=self.device, dtype=self.dtype)
+        
+        Xi = torch.stack(self.backward_noise[:-1], dim=0)
+        beta = self.compute_backward_projection_coef()
+
+        xi = Xi @ beta + innovation
+        self.backward_noise.append(xi)
+
+        return xi 
+
+        
+
             
-        # Extract blocks from the covariance matrix
-        C_past = cov_matrix[:t, :t]
-        c_cross = cov_matrix[:t, t]
-        c_present = cov_matrix[t, t]
-        
-        # Compute Schur complement: C(t,t) - C(t, <t) * C(<t, <t)^-1 * C(<t, t)
-        # Using lstsq is numerically safer than inv(C_past) @ c_cross
-        inv_C_past_cross, _, _, _ = np.linalg.lstsq(C_past, c_cross, rcond=None)
-        cond_var = c_present - np.dot(c_cross, inv_C_past_cross)
-        
-        # Ensure non-negativity against floating point errors
-        return max(cond_var, 1e-12)
-
-    def compute_innovations(self, t: int) -> tuple[np.ndarray, np.ndarray]:
-        """Samples the independent Gaussian innovations."""
-        # 1. Compute conditional scalar variances
-        var_xi = self.compute_conditional_variance(self.score_covariance_, t)
-        var_omega = self.compute_conditional_variance(self.weight_covariance_, t)
-        
-        # 2. Sample independent isotropic Gaussians
-        # \check{\xi}^t \sim N(0, var_xi * I_d)
-        d = self.dgp.d
-        xi_check = np.random.randn(d) * np.sqrt(var_xi)
-        
-        # \check{\omega}^t \sim N(0, var_omega * I_n)
-        n = self.n_labeled + self.n_unlabeled
-        omega_check = np.random.randn(n) * np.sqrt(var_omega)
-        
-        return xi_check, omega_check
-
-
-
-    def compute_trajectory(self):
-
-        for t in range(self.n_interations_+1):
-            omega = None
-
-
-    def update(self, iteration: int, lab_err: float, unl_err: float, test_err: float,
-               unl_use: float, unl_flip_rate: float):
-        """Update the state variables for a specific iteration."""
-        self.lab_error[iteration] = lab_err
-        self.unl_error[iteration] = unl_err
-        self.test_error[iteration] = test_err
-        self.unl_usage[iteration] = unl_use
-        self.unl_flipping_rate[iteration] = unl_flip_rate

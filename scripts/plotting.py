@@ -1,9 +1,11 @@
-from typing import Dict, List, Any, Optional
-import matplotlib.pyplot as plt
+import torch
 import numpy as np
+import matplotlib.pyplot as plt
+
+from typing import Dict, List, Any, Optional
 
 def plot_experiment(
-    res: np.ndarray, 
+    res: torch.Tensor, # Expects a PyTorch tensor
     base_params: Dict[str, Any], 
     N: int, M: int, N_test: int, T: int,
     algorithm_name: str,
@@ -12,9 +14,16 @@ def plot_experiment(
     metric_name: str = "test_error"
 ):
     """
-    Unified plotting function. Preserves specific LaTeX mapping, conditional parameter
-    filtering, and automatically formats time-indexed schedules.
+    Unified plotting function. Converts incoming PyTorch tensors to NumPy for Matplotlib.
+    Preserves specific LaTeX mapping, conditional parameter filtering, 
+    and automatically formats time-indexed schedules.
     """
+    # ---------------------------------------------------------
+    # THE CONVERSION STEP: Move from PyTorch land back to NumPy
+    # ---------------------------------------------------------
+    if isinstance(res, torch.Tensor):
+        res = res.cpu().numpy()
+
     is_sweep = sweep_param_name is not None and sweep_param_values is not None
     length = len(sweep_param_values) if is_sweep else 1
     
@@ -36,9 +45,9 @@ def plot_experiment(
         'n_iterations': r'$T$'
     }
 
-    # Helper to prevent large arrays (schedules) from breaking the plot title
+    # Helper to prevent large arrays/tensors from breaking the plot title
     def format_val(val, param_name):
-        if isinstance(val, (list, np.ndarray)):
+        if isinstance(val, (list, np.ndarray, torch.Tensor)):
             return "Schedule"
         if isinstance(val, float):
             return f"{val:.3f}"
