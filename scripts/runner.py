@@ -1,7 +1,8 @@
 import torch
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace, asdict
 from typing import Dict, List, Any, Type, Optional, Set
 
+from src.config import AlgorithmConfig
 from src.algorithms import SelfTrainedGradientDescent
 from src.callbacks import TestEvaluatorCallback
 
@@ -14,12 +15,7 @@ class MonteCarloExperiment:
     """
     data_gen: Any
     algorithm: Type
-    N: int
-    M: int
-    N_test: int
-    base_params: Dict[str, Any]
-
-    T: int = field(init=False, default=None)
+    base_config: AlgorithmConfig
     
     metrics: Set[str] = field(default_factory=lambda: {"test_error"})
     
@@ -28,11 +24,25 @@ class MonteCarloExperiment:
     sweep_param_name_: Optional[str] = field(init=False, default=None)
     sweep_param_values_: Optional[List[Any]] = field(init=False, default=None)
 
-    def __post_init__(self):
-        """Sever the reference to the external dictionary to prevent state contamination."""
-        # Copy to avoid mutating the caller's dict
-        self.base_params = self.base_params.copy()
-        self.T = self.base_params['n_iterations']
+    @property
+    def d(self) -> int:
+        return self.data_gen.cfg.dimensions
+
+    @property
+    def N(self) -> int:
+        return self.data_gen.cfg.n_labeled
+
+    @property
+    def M(self) -> int:
+        return self.data_gen.cfg.n_unlabeled
+
+    @property
+    def N_test(self) -> int:
+        return self.data_gen.cfg.n_test
+
+    @property
+    def T(self) -> int:
+        return self.base_config.n_iterations
 
     def run_sweep(
         self, 
@@ -42,7 +52,7 @@ class MonteCarloExperiment:
     ) -> None:
         """Executes the Monte Carlo simulation and stores the result internally."""
 
-        d = self.data_gen.d  # Dimensionality of the feature space
+        d = self.data_gen.cfg.dimensions  
         
         # Persist sweep configuration for the plotting module
         self.sweep_param_name_ = sweep_param_name
@@ -66,28 +76,30 @@ class MonteCarloExperiment:
             rng = torch.Generator().manual_seed(current_seed)
             self.data_gen.rng = rng
 
-            X_lab, Y_lab, X_unl, Y_unl, X_test, Y_test = self.data_gen.sample(self.N, self.M, self.N_test)
+            X_lab, Y_lab, X_unl, Y_unl, X_test, Y_test = self.data_gen.sample()
 
             # Generate initial weights using PyTorch
             w0 = torch.randn(d, generator=rng, dtype=torch.float64)
             
             for i, val in enumerate(values_to_test):
-                current_params = self.base_params.copy()
                 
+                # The pythonic way to modify a frozen dataclass for a single run:
                 if is_sweep:
-                    current_params[sweep_param_name] = val
-                    
-                current_params['n_iterations'] = self.T
+                    assert sweep_param_name is not None 
+                    # Creates a brand new config with just the sweep parameter altered
+                    current_cfg = replace(self.base_config, **{sweep_param_name: val})
+                else:
+                    current_cfg = self.base_config
                 
                 callback = TestEvaluatorCallback(
                     X_lab=X_lab, Y_lab=Y_lab,
                     X_unl=X_unl, Y_unl=Y_unl,
                     X_test=X_test, Y_test=Y_test,
-                    mu=self.data_gen.mu, # Pass mu for alignment metrics!
+                    mu=self.data_gen._mu,
                     metrics=self.metrics
                 )
                 
-                experiment = self.algorithm(**current_params, callback=callback)
+                experiment = self.algorithm(cfg=current_cfg, callback=callback)
                 
                 # Use .clone() instead of .copy() for PyTorch tensors
                 experiment.fit(X_lab, Y_lab, X_unl, initial_weights=w0.clone())
@@ -105,10 +117,11 @@ class MonteCarloExperiment:
         if metric not in self.results_:
             raise KeyError(f"Metric '{metric}' was not tracked during the experiment.")
         
-        # Pass all necessary metadata to the stateless plotting function
         plot_experiment(
             res=self.results_[metric],
-            base_params=self.base_params,
+            # Use asdict() so we don't have to rewrite the plotting script!
+            base_params=asdict(self.base_config),
+            d=self.d,
             N=self.N, 
             M=self.M, 
             N_test=self.N_test, 

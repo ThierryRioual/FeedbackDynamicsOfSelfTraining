@@ -1,26 +1,25 @@
 import torch
 import numpy as np
 import matplotlib.pyplot as plt
+import textwrap
 
 from typing import Dict, List, Any, Optional
 
 def plot_experiment(
-    res: torch.Tensor, # Expects a PyTorch tensor
+    res: torch.Tensor, 
     base_params: Dict[str, Any], 
-    N: int, M: int, N_test: int, T: int,
+    d: int, N: int, M: int, N_test: int, T: int,
     algorithm_name: str,
     sweep_param_name: Optional[str] = None, 
     sweep_param_values: Optional[List[Any]] = None,
-    metric_name: str = "test_error"
+    metric_name: str = "test_error",
+    extra_text: Optional[str] = None  # NEW: Pass custom notes here!
 ):
     """
     Unified plotting function. Converts incoming PyTorch tensors to NumPy for Matplotlib.
     Preserves specific LaTeX mapping, conditional parameter filtering, 
     and automatically formats time-indexed schedules.
     """
-    # ---------------------------------------------------------
-    # THE CONVERSION STEP: Move from PyTorch land back to NumPy
-    # ---------------------------------------------------------
     if isinstance(res, torch.Tensor):
         res = res.cpu().numpy()
 
@@ -29,7 +28,6 @@ def plot_experiment(
     
     cmap = plt.colormaps['plasma'] 
     
-    # Updated mapping to handle strict dataclass variable names
     latex_map = {
         'gamma': r'$\gamma$',
         'penalty_param': r'$\lambda$',
@@ -42,18 +40,24 @@ def plot_experiment(
         'alpha': r'$\alpha$',
         'ramp_start': r'$T_0$',
         'ramp_end': r'$T_1$',
-        'n_iterations': r'$T$'
+        'n_iterations': r'$T$',
+        'include_bias': 'Include\xa0bias',
+        'loss_function': 'Loss\xa0Function',
+        'penalty_function': 'Penalty\xa0Function'
     }
 
-    # Helper to prevent large arrays/tensors from breaking the plot title
+    # FIXED: Catches custom objects to prevent memory address printing
     def format_val(val, param_name):
         if isinstance(val, (list, np.ndarray, torch.Tensor)):
             return "Schedule"
         if isinstance(val, float):
             return f"{val:.3f}"
+        # If it's a custom class (like LogisticLoss), get its clean name
+        if hasattr(val, '__class__') and type(val).__module__ != 'builtins':
+            return val.__class__.__name__
         return str(val)
     
-    fig, axes = plt.subplots(1, length, figsize=(5 * max(1, length), 5), sharey=True)
+    fig, axes = plt.subplots(1, length, figsize=(5 * max(1, length), 6), sharey=True)
     if length == 1: 
         axes = [axes]
         
@@ -68,7 +72,6 @@ def plot_experiment(
         color_index = i / max(1, length)
         line_color = cmap(color_index)
 
-        # 1. Title Formatting
         if is_sweep:
             val = sweep_param_values[i]
             sym = latex_map.get(sweep_param_name, sweep_param_name)
@@ -79,33 +82,33 @@ def plot_experiment(
             axes[i].set_title(f"{formatted_title} Trajectory", fontsize=14)
         
         axes[i].plot(np.arange(T+1), mean_trajectory, color=line_color, 
-                     linewidth=2.0, label="Mean")
+                     linewidth=1.0, label="Mean")
         axes[i].plot(np.arange(T+1), median_trajectory, color=line_color, 
-                     linewidth=1.0, linestyle='--', alpha=0.8, label="Median")
+                     linewidth=0.8, linestyle='--', alpha=0.8, label="Median")
                      
         axes[i].fill_between(np.arange(T+1), lower_bound, upper_bound, 
-                             color=line_color, alpha=0.2, label="10th-90th Pct")
+                             color=line_color, alpha=0.15, label="10th-90th Pct")
         
-        axes[i].grid(True, linestyle=':', alpha=0.7)
+        axes[i].grid(which='major', color='#999999', linestyle='-', linewidth=0.8)
+        axes[i].grid(which='minor', color='#999999', linestyle=':', linewidth=0.5)
+        axes[i].minorticks_on()
+
         axes[i].set_xlabel(r"Iterations ($t$)", fontsize=12)
         
         if i == 0:
             axes[i].legend(loc="upper right", framealpha=0.9)
 
-    # Dynamically label the Y-axis based on the metric requested
     formatted_ylabel = metric_name.replace('_', ' ').title()
     axes[0].set_ylabel(formatted_ylabel, fontsize=12)
     
     bottom_ylim, top_ylim = axes[0].get_ylim()
     axes[0].set_ylim(max(0.0, bottom_ylim), top_ylim)
     
-    # 2. Labeling and Conditional Filtering for the Fixed Parameters
+    # Generate the string of fixed parameters
     fixed_str_parts = []
     for k, v in base_params.items():
         if is_sweep and k == sweep_param_name:
             continue
-            
-        # Filter out step_size/eta if the algorithm is not a gradient method
         if k in ('eta', 'step_size') and 'Gradient' not in algorithm_name:
             continue
 
@@ -115,17 +118,37 @@ def plot_experiment(
     
     fixed_str = ", ".join(fixed_str_parts)
     
-    # 3. Dynamic Super-Title Generation
+    # 1. Clean up the main title (Moved fixed params out!)
     if is_sweep:
         super_sym = latex_map.get(sweep_param_name, sweep_param_name)
-        title_prefix = rf"{algorithm_name} varying {super_sym}"
+        title_prefix = rf"{algorithm_name} - Varying: {super_sym}"
     else:
         title_prefix = rf"{algorithm_name} Dynamics"
         
     fig.suptitle(
-        rf"{title_prefix} | Fixed: {fixed_str} | $N={N}$, $M={M}$  $N_{{test}} = {N_test}$", 
-        fontsize=16, y=1.05
+        f"{title_prefix} \n with $d$={d}, $N={N}$, $M={M}$, $N_{{test}}={N_test}$ fixed.", 
+        fontsize=20, y=1.05
     )
     
-    plt.tight_layout()
+    # 2. Build the Text Box contents
+    # Wrap the fixed parameters so they don't run off the screen
+    wrapped_fixed = textwrap.fill(f"Fixed: {fixed_str}", width=100)
+    
+    box_text = wrapped_fixed
+    if extra_text:
+        # Wrap the extra text as well, separated by a newline
+        wrapped_extra = textwrap.fill(f"Note: {extra_text}", width=100)
+        box_text += f"\n{wrapped_extra}"
+
+    # 3. Adjust plot spacing to make room at the bottom
+    #plt.tight_layout()
+    fig.subplots_adjust(bottom=0.25) # Shrink the plots up slightly
+    
+    # 4. Render the Text Box
+    fig.text(
+        0.5, 0.05, box_text, 
+        ha='center', va='bottom', fontsize=16,
+        bbox=dict(boxstyle='round,pad=0.6', facecolor='#f8f9fa', edgecolor='#dee2e6', alpha=0.9)
+    )
+    
     plt.show()

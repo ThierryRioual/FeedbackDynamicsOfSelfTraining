@@ -91,7 +91,7 @@ class TestEvaluatorCallback:
 
         def get_preds_lab():
             if "preds_lab" not in cache:
-                cache["preds_lab"] = torch.where(get_scores_lab() >= 0, 1, -1)
+                cache["preds_lab"] = learner.predict(self.X_lab)
             return cache["preds_lab"]
 
         def get_scores_unl():
@@ -101,7 +101,7 @@ class TestEvaluatorCallback:
 
         def get_preds_unl():
             if "preds_unl" not in cache:
-                cache["preds_unl"] = torch.where(get_scores_unl() >= 0, 1, -1)
+                cache["preds_unl"] = learner.predict(self.X_unl)
             return cache["preds_unl"]
 
         def get_scores_test():
@@ -111,7 +111,7 @@ class TestEvaluatorCallback:
 
         def get_preds_test():
             if "preds_test" not in cache:
-                cache["preds_test"] = torch.where(get_scores_test() >= 0, 1, -1)
+                cache["preds_test"] = learner.predict(self.X_test)
             return cache["preds_test"]
 
 
@@ -159,7 +159,7 @@ class TestEvaluatorCallback:
 
         # --- 4. Pseudo-labeling Selection Metrics ---
         if "unl_usage" in self.metrics:
-            usage = (torch.abs(get_scores_unl()) >= learner.margin_threshold).float().mean().item()
+            usage = (torch.abs(get_scores_unl()) >= learner.cfg.margin_threshold).float().mean().item()
             self.history_["unl_usage"].append(usage)
 
         if "unl_flipping_rate" in self.metrics:

@@ -3,6 +3,10 @@ import torch
 from dataclasses import dataclass, field
 from typing import Optional, Callable, Tuple, List, Dict, Set
 
+from src.objectives import LossFunction, Penalty, LogisticLoss, RidgePenalty
+
+
+
 
 @dataclass
 class MacroscopicStateEvolution:
@@ -12,11 +16,16 @@ class MacroscopicStateEvolution:
     # Initialization paramters
 
     sample_to_dimension_ratio: float
+    labeled_data_ratio: float
+
+
+    gradient_step_size: float
+
     signal_prior: Callable[[int], torch.Tensor]
     label_prior: float 
 
-    score_function: Callable[[torch.Tensor], torch.Tensor]
-    penalty_gradient: Callable[[torch.Tensor], torch.Tensor]
+    loss_function: LossFunction = field(default_factory=LogisticLoss)
+    penalty_function: Penalty = field(default_factory=RidgePenalty)
 
     mc_seed: int = field(default=42) # monte carlo seed
     K: int = field(default=1000) # number of monte carlo samples
@@ -73,6 +82,20 @@ class MacroscopicStateEvolution:
         self.weight_signal_alignments = []
         self.score_label_alignments = []
         self.expected_score = []
+    
+    def score_function(self, prediction: torch.Tensor, label: torch.Tensor) -> torch.Tensor:
+        """
+        Computes the score function.
+        """
+        eta = self.gradient_step_size 
+        return - eta * self.loss_function.gradient(prediction, label)
+    
+    @property
+    def penalty_gradient(self) -> Callable[[torch.Tensor], torch.Tensor]:
+        """
+        Computes the gradient of the penalty function.
+        """
+        return self.penalty_function.gradient
 
     def forward_pass(self):   
         """
