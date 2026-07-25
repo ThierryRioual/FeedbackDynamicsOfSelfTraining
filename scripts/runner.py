@@ -18,6 +18,7 @@ class MonteCarloExperiment:
     base_config: AlgorithmConfig
     
     metrics: Set[str] = field(default_factory=lambda: {"test_error"})
+    stratified: bool = False  # Use stratified sampling for variance reduction
     
     # State variables excluded from the constructor argument list
     results_: Optional[Dict[str, torch.Tensor]] = field(init=False, default=None)
@@ -26,19 +27,19 @@ class MonteCarloExperiment:
 
     @property
     def d(self) -> int:
-        return self.data_gen.cfg.dimensions
+        return self.data_gen.dimensions
 
     @property
     def N(self) -> int:
-        return self.data_gen.cfg.n_labeled
+        return self.data_gen.n_labeled
 
     @property
     def M(self) -> int:
-        return self.data_gen.cfg.n_unlabeled
+        return self.data_gen.n_unlabeled
 
     @property
     def N_test(self) -> int:
-        return self.data_gen.cfg.n_test
+        return self.data_gen.n_test
 
     @property
     def T(self) -> int:
@@ -52,7 +53,7 @@ class MonteCarloExperiment:
     ) -> None:
         """Executes the Monte Carlo simulation and stores the result internally."""
 
-        d = self.data_gen.cfg.dimensions  
+        d = self.data_gen.dimensions  
         
         # Persist sweep configuration for the plotting module
         self.sweep_param_name_ = sweep_param_name
@@ -76,7 +77,7 @@ class MonteCarloExperiment:
             rng = torch.Generator().manual_seed(current_seed)
             self.data_gen.rng = rng
 
-            X_lab, Y_lab, X_unl, Y_unl, X_test, Y_test = self.data_gen.sample()
+            X_lab, Y_lab, X_unl, Y_unl, X_test, Y_test = self.data_gen.sample(stratified=self.stratified)
 
             # Generate initial weights using PyTorch
             w0 = torch.randn(d, generator=rng, dtype=torch.float64)

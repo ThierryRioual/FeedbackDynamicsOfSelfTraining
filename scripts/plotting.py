@@ -23,6 +23,8 @@ def plot_experiment(
     if isinstance(res, torch.Tensor):
         res = res.cpu().numpy()
 
+    n_runs = res.shape[1]
+
     is_sweep = sweep_param_name is not None and sweep_param_values is not None
     length = len(sweep_param_values) if is_sweep else 1
     
@@ -87,7 +89,7 @@ def plot_experiment(
                      linewidth=0.8, linestyle='--', alpha=0.8, label="Median")
                      
         axes[i].fill_between(np.arange(T+1), lower_bound, upper_bound, 
-                             color=line_color, alpha=0.15, label="10th-90th Pct")
+                             color=line_color, alpha=0.2, label="10th-90th Pct")
         
         axes[i].grid(which='major', color='#999999', linestyle='-', linewidth=0.8)
         axes[i].grid(which='minor', color='#999999', linestyle=':', linewidth=0.5)
@@ -121,9 +123,9 @@ def plot_experiment(
     # 1. Clean up the main title (Moved fixed params out!)
     if is_sweep:
         super_sym = latex_map.get(sweep_param_name, sweep_param_name)
-        title_prefix = rf"{algorithm_name} - Varying: {super_sym}"
+        title_prefix = rf"{algorithm_name} - Sweep over {super_sym} ({n_runs} runs)"
     else:
-        title_prefix = rf"{algorithm_name} Dynamics"
+        title_prefix = rf"{algorithm_name} - Dynamics ({n_runs} runs)"
         
     fig.suptitle(
         f"{title_prefix} \n with $d$={d}, $N={N}$, $M={M}$, $N_{{test}}={N_test}$ fixed.", 

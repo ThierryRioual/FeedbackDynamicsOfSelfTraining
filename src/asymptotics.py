@@ -3,8 +3,8 @@ import torch
 from dataclasses import dataclass, field
 from typing import Optional, Callable, Tuple, List, Dict, Set
 
+from src.config import DataConfig, AlgorithmConfig
 from src.objectives import LossFunction, Penalty, LogisticLoss, RidgePenalty
-
 
 
 
@@ -13,30 +13,19 @@ class MacroscopicStateEvolution:
     """
     Numerically integrate the state evolution equations and compute the deterministic theoretical limits using Monte Carlo averaging.
     """
-    # Initialization paramters
-
-    sample_to_dimension_ratio: float
-    labeled_data_ratio: float
-
-
-    gradient_step_size: float
-
-    signal_prior: Callable[[int], torch.Tensor]
-    label_prior: float 
-
-    loss_function: LossFunction = field(default_factory=LogisticLoss)
-    penalty_function: Penalty = field(default_factory=RidgePenalty)
+    # Frozen configuration objects (same pattern as SelfTrainedGradientDescent / IsotropicGaussian)
+    data_cfg: DataConfig
+    algo_cfg: AlgorithmConfig
 
     mc_seed: int = field(default=42) # monte carlo seed
     K: int = field(default=1000) # number of monte carlo samples
 
-    inital_bias: float = field(default=0) # b_{init}
+    initial_bias: torch.float64 = field(default=0.0) # b_{init}
     initial_weight: torch.Tensor = field(default=None) # w_{init}
 
-    # Instance variables
-
-    signal: torch.Tensor = field(init=False)
-    label: torch.Tensor = field(init=False)
+    # Instance variables    
+    signal: torch.Tensor = field(init=False) # \mu
+    label: torch.Tensor = field(init=False) # Y
 
     bias: List[torch.Tensor] = field(init=False) # b 
     weight: List[torch.Tensor] = field(init=False) # w
@@ -57,8 +46,8 @@ class MacroscopicStateEvolution:
         """
         torch.manual_seed(self.mc_seed)
 
-        self.signal = self.signal_prior(self.K)
-        self.label = (torch.rand(self.K) < self.label_prior).float() * 2 - 1 # transform to {+1, -1}
+        self.signal = torch.tensor([self.data_cfg.signal_prior() for _ in range(self.K)])
+        self.label = (torch.rand(self.K) < self.data_cfg.label_prior).float() * 2 - 1 # transform to {+1, -1}
 
         self.initial_bias = torch.tensor(self.initial_bias, requires_grad=True)
 
@@ -82,33 +71,58 @@ class MacroscopicStateEvolution:
         self.weight_signal_alignments = []
         self.score_label_alignments = []
         self.expected_score = []
-    
-    def score_function(self, prediction: torch.Tensor, label: torch.Tensor) -> torch.Tensor:
+
+    @property
+    def rho(self) -> float:
         """
-        Computes the score function.
+        Returns the observation prior (ρ).
         """
-        eta = self.gradient_step_size 
-        return - eta * self.loss_function.gradient(prediction, label)
+        return self.data_cfg.observation_prior
     
+    @property
+    def delta(self) -> float:
+        """
+        Returns the data-to-dimension ratio.
+        """
+        return self.data_cfg.data_to_dimension_ratio
+
+    @property
+    def eta(self) -> float:
+        """
+        Returns the learning rate.
+        """
+        return self.algo_cfg.step_size
+
     @property
     def penalty_gradient(self) -> Callable[[torch.Tensor], torch.Tensor]:
         """
         Computes the gradient of the penalty function.
         """
-        return self.penalty_function.gradient
-
+        return self.algo_cfg.penalty_function.gradient
+    
+    def score_function(self, prediction: torch.Tensor, label: torch.Tensor) -> torch.Tensor:
+        """
+        Computes the score function.
+        """
+        return - self.eta * self.algo_cfg.loss_function.gradient(prediction, label)
+    
     def forward_pass(self):   
         """
         Performs the forward pass of the self-training algorithm.
         """
-        gamma = self.compute_weight_memory() # \gamma^{[w]}
+
         m = self.compute_weight_signal_alignment() # m
         omega = self.compute_forward_noise() # \omega
-
-        G = torch.stack(self.score[:-1], dim=1) # G_{t-1}
         b = self.bias[-1] # b_{t}
 
-        r = b * torch.ones(self.K) + m * self.label + G @ gamma + omega # r^{t}
+
+        if len(self.weight) == 1: # Handles initial step t=0
+            r = b * torch.ones(self.K) + m * self.label + omega
+        else: # Handles t>0
+            gamma = self.compute_weight_memory() # \gamma^{[w]}
+            G = torch.stack(self.score[:-1], dim=1) # G_{t-1}
+            r = b * torch.ones(self.K) + m * self.label + G @ gamma + omega # r^{t}
+
         g = self.score_function(r) # g^{t}
 
         self.prediction.append(r) # r
@@ -132,7 +146,7 @@ class MacroscopicStateEvolution:
         h = self.penalty_gradient(prev_w) # h
 
         b = prev_b + zeta # g^{t}
-        w = prev_w + h + chi * self.signal + W @ gamma + xi # r^{t}
+        w = prev_w + h + chi * self.signal + (W @ gamma + xi) / torch.sqrt(self.delta) # r^{t}
 
         self.bias.append(b) # g
         self.weight.append(w) # r
@@ -251,10 +265,15 @@ class MacroscopicStateEvolution:
         r"""
         Computes the forward noise variance ($$ \vartheta^{[w]} $$).
         """
-        W = torch.stack(self.weight[:-1], dim=1)
-        v = self.weight[-1] - self.weight[-2] if len(self.weight) > 1 else self.weight[-1]
-        alpha = self.compute_forward_projection_coef()
-        residual = v - W @ alpha
+        if len(self.weight) == 1: # Handles the initial step t=0
+            v = self.weight[-1]
+            residual = v
+        else: # Handles t>0
+            v = self.weight[-1] - self.weight[-2]
+            W = torch.stack(self.weight[:-1], dim=1)
+            alpha = self.compute_forward_projection_coef()
+            residual = v - W @ alpha
+    
         return torch.square(residual).mean()
 
     def compute_backward_noise_variance(self) -> torch.Tensor:
@@ -272,12 +291,15 @@ class MacroscopicStateEvolution:
         Computes the forward gaussian noise ($$ \omega^{t} $$).
         """
         variance = self.compute_forward_noise_variance()
-        innovation = torch.sqrt(variance) * torch.randn(self.K, device=self.device, dtype=self.dtype)
-        
-        Omega = torch.stack(self.forward_noise[:-1], dim=0)
-        alpha = self.compute_forward_projection_coef()
+        innovation = torch.sqrt(variance) * torch.randn(self.K)
 
-        omega = Omega @ alpha + self.forward_noise[:-1] + innovation
+        if len(self.weight) == 1: # Handles the initial step t=0
+            omega = innovation
+        else: # Handles t>0
+            Omega = torch.stack(self.forward_noise[:-1], dim=0)
+            alpha = self.compute_forward_projection_coef()
+            omega = Omega @ alpha + self.forward_noise[:-1] + innovation
+
         self.forward_noise.append(omega)
 
         return omega
@@ -287,7 +309,7 @@ class MacroscopicStateEvolution:
         Computes the backward gaussian noise ($$ \xi^{t} $$).
         """
         variance = self.compute_backward_noise_variance()
-        innovation = torch.sqrt(variance) * torch.randn(self.K, device=self.device, dtype=self.dtype)
+        innovation = torch.sqrt(variance) * torch.randn(self.K)
         
         Xi = torch.stack(self.backward_noise[:-1], dim=0)
         beta = self.compute_backward_projection_coef()
@@ -296,7 +318,3 @@ class MacroscopicStateEvolution:
         self.backward_noise.append(xi)
 
         return xi 
-
-        
-
-            
