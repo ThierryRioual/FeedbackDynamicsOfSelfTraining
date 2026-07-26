@@ -13,8 +13,8 @@ MetricName = Literal[
     "unl_flipping_rate",
     "bias_term",
     "weight_signal_alignment",
-    "label_score_alignment",
-    "mean_score"
+    "label_loc_field_alignment",
+    "mean_loc_field"
 ]
 
 @dataclass
@@ -30,13 +30,13 @@ class TestEvaluatorCallback:
     - "unl_usage": Fraction of unlabeled samples used for pseudo-labeling
     - "unl_flipping_rate": Rate of label flipping in unlabeled data across iterations
 
-    - "lab_label_score_alignment": Tracks E[Y * score(X)] on the labeled set
-    - "unl_label_score_alignment": Tracks E[Y * score(X)] on the unlabeled set
-    - "test_label_score_alignment": Tracks E[Y * score(X)] on the test set
+    - "lab_label_loc_field_alignment": Tracks E[Y * r(X)] on the labeled set (label-field covariance)
+    - "unl_label_loc_field_alignment": Tracks E[Y * r(X)] on the unlabeled set
+    - "test_label_loc_field_alignment": Tracks E[Y * r(X)] on the test set
 
-    - "lab_mean_score": Tracks E[score(X)] on the labeled set
-    - "unl_mean_score": Tracks E[score(X)] on the unlabeled set
-    - "test_mean_score": Tracks E[score(X)] on the test set
+    - "lab_mean_loc_field": Tracks E[r(X)] on the labeled set (mean field)
+    - "unl_mean_loc_field": Tracks E[r(X)] on the unlabeled set
+    - "test_mean_loc_field": Tracks E[r(X)] on the test set
 
     - "bias_term": Tracks the value of the intercept (b)
     - "weight_vector_norm": Tracks the norm of the weight vector (||w||)
@@ -68,9 +68,9 @@ class TestEvaluatorCallback:
             assert self.X_unl is not None, "X_unl required for unlabeled metrics."
         if "unl_error" in self.metrics or "unl_usage" in self.metrics:
             assert self.Y_unl is not None, "Y_unl required for unl_error/unl_usage."
-        if {"test_error", "label_score_alignment", "mean_score"} & self.metrics:
+        if {"test_error", "label_loc_field_alignment", "mean_loc_field"} & self.metrics:
             assert self.X_test is not None, "X_test required for test metrics."
-        if {"test_error", "label_score_alignment"} & self.metrics:
+        if {"test_error", "label_loc_field_alignment"} & self.metrics:
             assert self.Y_test is not None, "Y_test required for test errors/alignment."
             
         # Validate macroscopic tracking dependencies
@@ -84,30 +84,30 @@ class TestEvaluatorCallback:
         cache = {}
 
         # --- Lazy Getters ---
-        def get_scores_lab():
-            if "scores_lab" not in cache:
-                cache["scores_lab"] = learner.score(self.X_lab)
-            return cache["scores_lab"]
+        def get_loc_fields_lab():
+            if "loc_fields_lab" not in cache:
+                cache["loc_fields_lab"] = learner.compute_loc_field(self.X_lab)
+            return cache["loc_fields_lab"]
 
         def get_preds_lab():
             if "preds_lab" not in cache:
                 cache["preds_lab"] = learner.predict(self.X_lab)
             return cache["preds_lab"]
 
-        def get_scores_unl():
-            if "scores_unl" not in cache:
-                cache["scores_unl"] = learner.score(self.X_unl)
-            return cache["scores_unl"]
+        def get_loc_fields_unl():
+            if "loc_fields_unl" not in cache:
+                cache["loc_fields_unl"] = learner.compute_loc_field(self.X_unl)
+            return cache["loc_fields_unl"]
 
         def get_preds_unl():
             if "preds_unl" not in cache:
                 cache["preds_unl"] = learner.predict(self.X_unl)
             return cache["preds_unl"]
 
-        def get_scores_test():
-            if "scores_test" not in cache:
-                cache["scores_test"] = learner.score(self.X_test)
-            return cache["scores_test"]
+        def get_loc_fields_test():
+            if "loc_fields_test" not in cache:
+                cache["loc_fields_test"] = learner.compute_loc_field(self.X_test)
+            return cache["loc_fields_test"]
 
         def get_preds_test():
             if "preds_test" not in cache:
@@ -117,55 +117,55 @@ class TestEvaluatorCallback:
 
         # --- 1. Labeled Metrics ---
         if "lab_error" in self.metrics:
-            error = (get_preds_lab() != self.Y_lab).float().mean().item()
+            error = (get_preds_lab() != self.Y_lab).double().mean().item()
             self.history_["lab_error"].append(error)
         
-        if "lab_label_score_alignment" in self.metrics:
-            alignment = torch.mean(self.Y_lab * get_scores_lab()).item()
-            self.history_["lab_label_score_alignment"].append(alignment)
+        if "lab_label_loc_field_alignment" in self.metrics:
+            alignment = torch.mean(self.Y_lab * get_loc_fields_lab()).item()
+            self.history_["lab_label_loc_field_alignment"].append(alignment)
 
-        if "lab_mean_score" in self.metrics:
-            mean_score = torch.mean(get_scores_lab()).item()
-            self.history_["lab_mean_score"].append(mean_score)
+        if "lab_mean_loc_field" in self.metrics:
+            mean_val = torch.mean(get_loc_fields_lab()).item()
+            self.history_["lab_mean_loc_field"].append(mean_val)
 
 
         # --- 2. Unlabeled Metrics ---
         if "unl_error" in self.metrics:
-            error = (get_preds_unl() != self.Y_unl).float().mean().item()
+            error = (get_preds_unl() != self.Y_unl).double().mean().item()
             self.history_["unl_error"].append(error)
 
-        if "unl_label_score_alignment" in self.metrics:
-            alignment = torch.mean(self.Y_unl * get_scores_unl()).item()
-            self.history_["unl_label_score_alignment"].append(alignment)
+        if "unl_label_loc_field_alignment" in self.metrics:
+            alignment = torch.mean(self.Y_unl * get_loc_fields_unl()).item()
+            self.history_["unl_label_loc_field_alignment"].append(alignment)
 
-        if "unl_mean_score" in self.metrics:
-            mean_score = torch.mean(get_scores_unl()).item()
-            self.history_["unl_mean_score"].append(mean_score)
+        if "unl_mean_loc_field" in self.metrics:
+            mean_val = torch.mean(get_loc_fields_unl()).item()
+            self.history_["unl_mean_loc_field"].append(mean_val)
 
 
         # --- 3. Test Metrics ---
         if "test_error" in self.metrics:
-            error = (get_preds_test() != self.Y_test).float().mean().item()
+            error = (get_preds_test() != self.Y_test).double().mean().item()
             self.history_["test_error"].append(error)
                 
-        if "test_label_score_alignment" in self.metrics:
-            alignment = torch.mean(self.Y_test * get_scores_test()).item()
-            self.history_["test_label_score_alignment"].append(alignment)
+        if "test_label_loc_field_alignment" in self.metrics:
+            alignment = torch.mean(self.Y_test * get_loc_fields_test()).item()
+            self.history_["test_label_loc_field_alignment"].append(alignment)
 
-        if "test_mean_score" in self.metrics:
-            mean_score = torch.mean(get_scores_test()).item()
-            self.history_["test_mean_score"].append(mean_score)
+        if "test_mean_loc_field" in self.metrics:
+            mean_val = torch.mean(get_loc_fields_test()).item()
+            self.history_["test_mean_loc_field"].append(mean_val)
 
 
         # --- 4. Pseudo-labeling Selection Metrics ---
         if "unl_usage" in self.metrics:
-            usage = (torch.abs(get_scores_unl()) >= learner.cfg.margin_threshold).float().mean().item()
+            usage = (torch.abs(get_loc_fields_unl()) >= learner.cfg.margin_threshold).double().mean().item()
             self.history_["unl_usage"].append(usage)
 
         if "unl_flipping_rate" in self.metrics:
-            if learner.prev_scores_ is not None:
-                prev_preds = torch.where(learner.prev_scores_ >= 0, 1, -1)
-                flipping_rate = (get_preds_unl() != prev_preds).float().mean().item()
+            if learner.prev_loc_fields_ is not None:
+                prev_preds = torch.where(learner.prev_loc_fields_ >= 0, 1, -1)
+                flipping_rate = (get_preds_unl() != prev_preds).double().mean().item()
                 self.history_["unl_flipping_rate"].append(flipping_rate)
             else:
                 self.history_["unl_flipping_rate"].append(0.0)

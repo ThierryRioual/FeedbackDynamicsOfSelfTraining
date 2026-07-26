@@ -1,4 +1,5 @@
 import torch
+torch.set_default_dtype(torch.float64)
 
 from dataclasses import dataclass, field
 from typing import Callable
@@ -35,18 +36,47 @@ class DataConfig:
             )
 
 
+from dataclasses import dataclass, field
+import typing
+
 @dataclass(frozen=True)
 class AlgorithmConfig:
     """
     Learning algorithm hyperparameters.
     """
-    n_iterations: int # T
-    margin_threshold: float # \kappa
-    step_size: float # \eta
-    penalty_param: float # \lambda
-    pseudo_label_param: float # \pi
-    ramp_start: int # T_0
-    ramp_end: int # T_1
+    n_iterations: int          # T
+    margin_threshold: float    # \kappa
+    step_size: float           # \eta
+    penalty_param: float       # \lambda
+    pseudo_label_param: float  # \pi
+    ramp_start: int            # T_0
+    ramp_end: int              # T_1
     include_bias: bool = True
     loss_function: LossFunction = field(default_factory=LogisticLoss) # \ell
     penalty_function: Penalty = field(default_factory=RidgePenalty)
+    
+    # Internal schedule stored as a list of floats
+    pseudo_label_param_schedule_: list[float] = field(init=False, default_factory=list)
+
+    def __post_init__(self):
+        """
+        Precompute the pseudo-label parameter schedule as a list of floats.
+        """
+        schedule = []
+        ramp_range = self.ramp_end - self.ramp_start
+        
+        for t in range(self.n_iterations):
+            if t <= self.ramp_start:
+                val = 0.0
+            elif t >= self.ramp_end:
+                val = self.pseudo_label_param
+            else:
+                val = self.pseudo_label_param * (t - self.ramp_start) / ramp_range
+            schedule.append(float(val))
+
+        # Necessary pattern to assign fields on frozen dataclasses
+        object.__setattr__(self, "pseudo_label_param_schedule_", schedule)
+
+    def get_pseudo_label_weight(self, t: int) -> float:
+        """Returns the pseudo-label weight \pi^t at iteration t."""
+        return self.pseudo_label_param_schedule_[t]

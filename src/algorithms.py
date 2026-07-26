@@ -18,42 +18,33 @@ class SelfTrainedGradientDescent:
 
     bias: float = field(init=False, default=None) # b
     weights: torch.Tensor = field(init=False, default=None) # w
-    prev_scores_: torch.Tensor = field(init=False, default=None) # Tracks which unlabeled samples are used for pseudo-labeling
-
-    pseudo_label_param_schedule_: torch.Tensor = field(init=False, default=None)
-
-    def __post_init__(self):
-        """
-        """
-        t = torch.arange(self.cfg.n_iterations)
-        t_clamped = torch.clamp(t, min=self.cfg.ramp_start, max=self.cfg.ramp_end)
-        self.pseudo_label_param_schedule_ = self.cfg.pseudo_label_param * (t_clamped - self.cfg.ramp_start) / (self.cfg.ramp_end - self.cfg.ramp_start)
-         
+    prev_loc_fields_: torch.Tensor = field(init=False, default=None) # Tracks unlabeled fields for pseudo-labeling flipping rate
 
     def _compute_empirical_risk_gradient(self, 
-                          scores_lab: torch.Tensor, 
+                          loc_fields_lab: torch.Tensor, 
                           Y_lab: torch.Tensor,
-                          scores_unl: torch.Tensor, 
+                          loc_fields_unl: torch.Tensor, 
                           alpha: float) -> torch.Tensor:
         """
-        Computes the empirical risk of the self-training algorithm. ($\\nabla R$ vector)
+        Computes the gradient of the empirical risk with respect to the field vector r.
+        Returns the pseudo-residual vector g = -η ∇_r R(r). ($\\nabla R$ vector)
         """
         
         # Compute gradient from labeled data
-        n_lab = scores_lab.shape[0]
-        grad_lab = self.cfg.loss_function.gradient(scores_lab, Y_lab) / n_lab
+        n_lab = loc_fields_lab.shape[0]
+        grad_lab = self.cfg.loss_function.gradient(loc_fields_lab, Y_lab) / n_lab
 
         # Compute gradient from pseudo-labeled unlabeled data
-        n_unl = scores_unl.shape[0]
-        mask = torch.abs(scores_unl) >= self.cfg.margin_threshold
+        n_unl = loc_fields_unl.shape[0]
+        mask = torch.abs(loc_fields_unl) >= self.cfg.margin_threshold
         n_psd = mask.sum()
-        Y_psd = torch.where(scores_unl >= 0, 1, -1)
+        Y_psd = torch.where(loc_fields_unl >= 0, 1, -1)
         if n_psd > 0:
-            grad_unl = self.cfg.loss_function.gradient(scores_unl, Y_psd) * mask / n_psd
+            grad_unl = self.cfg.loss_function.gradient(loc_fields_unl, Y_psd) * mask / n_psd
         else:
-            grad_unl = torch.zeros_like(scores_unl)
+            grad_unl = torch.zeros_like(loc_fields_unl)
 
-        self.prev_scores_ = scores_unl
+        self.prev_loc_fields_ = loc_fields_unl
 
         n_total = n_lab + n_unl 
 
@@ -66,8 +57,9 @@ class SelfTrainedGradientDescent:
                           X_unl: torch.Tensor, 
                           alpha: float) -> Tuple[float, torch.Tensor]:
         """
-        Computes the gradient of the loss function with respect to model parameters weights.
-        This includes contributions from labeled data, pseudo-labeled unlabeled data, and regularization.
+        Computes the full gradient step for model parameters (bias and weights).
+        First computes the field r = Xw/√d + b, then the pseudo-residual g = ∇_r ℓ(r, y),
+        and finally backpropagates through X to get the weight gradient plus the decay step.
         ($$ 1^\top \nabla R(r) / n, \sqrt{d}/n * X^\top \nabla R(r) + \lambda \nabla P(w) $$) 
         """
 
@@ -76,17 +68,17 @@ class SelfTrainedGradientDescent:
         d = torch.tensor(weights.shape[0])
         n = torch.tensor(X_lab.shape[0] + X_unl.shape[0])
 
-        scores_lab = (X_lab @ weights) / torch.sqrt(d) + bias
-        scores_unl = (X_unl @ weights) / torch.sqrt(d) + bias
+        loc_fields_lab = (X_lab @ weights) / torch.sqrt(d) + bias
+        loc_fields_unl = (X_unl @ weights) / torch.sqrt(d) + bias
 
-        emp_risk = self._compute_empirical_risk_gradient(scores_lab, Y_lab, scores_unl, alpha) # \nabla R
+        emp_risk = self._compute_empirical_risk_gradient(loc_fields_lab, Y_lab, loc_fields_unl, alpha) # pseudo-residual
 
         X_total = torch.concatenate([X_lab, X_unl])
 
-        # Compute gradient of penalty term
-        grad_pen = self.cfg.penalty_function.gradient(weights)
+        # Compute the decay step (weight decay / penalty gradient)
+        decay = self.cfg.penalty_function.gradient(weights)
 
-        return torch.mean(emp_risk), (torch.sqrt(d) / n) * (X_total.T @ emp_risk) + self.cfg.penalty_param * grad_pen
+        return torch.mean(emp_risk), (torch.sqrt(d) / n) * (X_total.T @ emp_risk) + self.cfg.penalty_param * decay
 
     def fit(self, X_lab: torch.Tensor, Y_lab: torch.Tensor, X_unl: torch.Tensor, 
             initial_bias: Optional[float] = None, initial_weights: Optional[torch.Tensor] = None) -> List[float]:
@@ -104,7 +96,7 @@ class SelfTrainedGradientDescent:
             self.callback(self)
 
         for t in range(self.cfg.n_iterations):
-            psd_param = self.pseudo_label_param_schedule_[t] # \pi^t
+            psd_param = self.cfg.get_pseudo_label_weight(t) # \pi^t
         
             # Compute the gradient and update weights
             b_grad, w_grad = self._compute_gradient(self.bias, self.weights, X_lab, Y_lab, X_unl, psd_param)
@@ -122,9 +114,9 @@ class SelfTrainedGradientDescent:
 
         return self.bias, self.weights
     
-    def score(self, X: torch.Tensor, bias: Optional[float] = None, weights: Optional[torch.Tensor] = None) -> torch.Tensor:
+    def compute_loc_field(self, X: torch.Tensor, bias: Optional[float] = None, weights: Optional[torch.Tensor] = None) -> torch.Tensor:
         """
-        Computes the raw scores (logits) for the given input data X using the learned weights.
+        Computes the field (local field / pre-activation) r = Xw/√d + b for the given input data X.
         If weights are not provided, it uses the model's current weights.
         """
         assert (self.cfg.include_bias) or (bias is None), "Cannot include bias when inlcude_bias is set to False"
@@ -139,8 +131,8 @@ class SelfTrainedGradientDescent:
         
     def predict(self, X: torch.Tensor, bias: Optional[float] = None, weights: Optional[torch.Tensor] = None) -> torch.Tensor:
         """
-        Predicts the labels for the given input data X using the learned weights.
+        Predicts the binary labels for the given input data X by thresholding the field.
         If weights are not provided, it uses the model's current weights.
         """
         assert (self.cfg.include_bias) or (bias is None), "Cannot include bias when inlcude_bias is set to False"
-        return torch.where(self.score(X, bias, weights) >= 0, 1, -1)
+        return torch.where(self.compute_loc_field(X, bias, weights) >= 0, 1, -1)
