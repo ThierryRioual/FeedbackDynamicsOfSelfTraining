@@ -19,7 +19,7 @@ class IsotropicGaussian:
     n_test: int            # number of test samples
     dimensions: int        # feature dimension d
     seed: int = 42
-    signal_vector: Optional[torch.Tensor] = None  # optionally override signal_prior
+    signal_vector: Optional[torch.Tensor] = None  # optionally override signal_law
 
     rng: torch.Generator = field(init=False)
     _mu: torch.Tensor = field(init=False)
@@ -33,17 +33,16 @@ class IsotropicGaussian:
             self._mu = self.signal_vector
         else:
             self._mu = torch.tensor(
-                [self.cfg.signal_prior() for _ in range(self.dimensions)],
+                [self.cfg.signal_law() for _ in range(self.dimensions)],
                 dtype=torch.float64
             )
-            self._mu = self._mu / torch.linalg.norm(self._mu)
 
     # --- Convenience properties (expected stratified counts for display) ---
 
     @property
     def n_labeled(self) -> int:
         """Expected number of labeled samples: round(ρ * n_train)."""
-        return round(self.cfg.observation_prior * self.n_train)
+        return round(self.cfg.supervision_ratio * self.n_train)
 
     @property
     def n_unlabeled(self) -> int:
@@ -57,9 +56,9 @@ class IsotropicGaussian:
 
     def _sample_class(self, n_samples: int, sign: int) -> torch.Tensor:
         """Samples from the isotropic Gaussian distribution for a given class label."""
-        dim = self._mu.shape[0]
-        noise = torch.randn((n_samples, dim), generator=self.rng, dtype=torch.float64)
-        return sign * self._mu + self.cfg.scale * noise
+        d = self._mu.shape[0]
+        noise = torch.randn((n_samples, d), generator=self.rng, dtype=torch.float64)
+        return (sign * self._mu) / (d ** 0.5) + self.cfg.scale * noise
 
     def sample(self, stratified: bool = False) -> Tuple[torch.Tensor, ...]:
         """
@@ -70,7 +69,7 @@ class IsotropicGaussian:
                         (zero binomial variance, ideal for smooth SE comparison plots).
                         If False, uses pure i.i.d. random sampling (mathematically pure).
         """
-        rho = self.cfg.observation_prior
+        rho = self.cfg.supervision_ratio
         p = self.cfg.label_prior
 
         if stratified:

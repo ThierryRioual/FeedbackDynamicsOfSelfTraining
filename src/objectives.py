@@ -40,3 +40,34 @@ class RidgePenalty(Penalty):
 
     def gradient(self, w: torch.Tensor) -> torch.Tensor:
         return w
+
+class SelectionFunction(ABC):
+    """Abstract base class for pseudo-label selection masks."""
+    
+    @abstractmethod
+    def __call__(self, preactivation: torch.Tensor, pos_margin: float, neg_margin: float) -> torch.Tensor:
+        """Returns a mask with values in [0, 1] indicating selection."""
+        pass
+
+class HardSelection(SelectionFunction):
+    """Standard hard thresholding used in empirical self-training."""
+    
+    def __call__(self, preactivation: torch.Tensor, pos_margin: float, neg_margin: float) -> torch.Tensor:
+        return torch.where((preactivation >= pos_margin) | (preactivation <= neg_margin), 1.0, 0.0)
+
+class LipschitzSelection(SelectionFunction):
+    """
+    Differentiable surrogate thresholding for theoretical State Evolution.
+    Allows PyTorch Autograd to capture boundary probability mass.
+    """
+    def __init__(self, epsilon: float = 0.1):
+        self.epsilon = epsilon
+
+    def __call__(self, preactivation: torch.Tensor, pos_margin: float, neg_margin: float) -> torch.Tensor:
+        if pos_margin == 0.0 and neg_margin == 0.0:
+            return torch.ones_like(preactivation)
+            
+        mask_pos = torch.clamp((preactivation - (pos_margin - self.epsilon)) / (2 * self.epsilon), min=0.0, max=1.0)
+        mask_neg = torch.clamp(((neg_margin + self.epsilon) - preactivation) / (2 * self.epsilon), min=0.0, max=1.0)
+        
+        return mask_pos + mask_neg
