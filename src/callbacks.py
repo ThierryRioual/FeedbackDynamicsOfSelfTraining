@@ -69,7 +69,7 @@ class TestEvaluatorCallback:
     Y_test: Optional[torch.Tensor] = None
     mu: Optional[torch.Tensor] = None  # Required for weight_signal_alignment
     sigma: Optional[float] = None # Required for population_error
-    rho: Optional[float] = None # Required for population_error
+    p: Optional[float] = None # Required for population_error
 
     X_train: Optional[torch.Tensor] = field(init=False, default=None)
     Y_train: Optional[torch.Tensor] = field(init=False, default=None)
@@ -303,7 +303,7 @@ class TestEvaluatorCallback:
                 m=self.history_["weight_signal_alignment"][-1],
                 tau=self.history_["weight_vector_norm"][-1],
                 sigma=self.sigma,
-                rho=self.rho
+                p=self.p
             )
             self.history_["population_error"].append(pop_err)
        

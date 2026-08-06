@@ -1,3 +1,7 @@
+from IPython.core import getipython
+from IPython.core import getipython
+from IPython.core import getipython
+from IPython.core import getipython
 import torch
 
 from scipy.stats import norm
@@ -112,6 +116,20 @@ class MacroscopicStateEvolution:
         Returns the observation prior.
         """
         return self.data_cfg.supervision_ratio
+
+    @property
+    def p(self) -> float:
+        """
+        Returns the label prior.
+        """
+        return self.data_cfg.label_prior
+
+    @property
+    def sigma(self) -> float:
+        """
+        Returns the signal strength.
+        """
+        return self.data_cfg.scale
     
     @property
     def delta(self) -> float:
@@ -213,7 +231,7 @@ class MacroscopicStateEvolution:
             G = torch.stack(self.residual[:t], dim=1) # G_{t-1} (residual matrix)
 
             ones = torch.ones(self.K)
-            r = b * ones + m * self.label + G @ gamma + omega # r^{t}
+            r = b * ones + m * self.label + (G @ gamma) / (self.delta ** 0.5) + omega # r^{t}
 
             if self._debug:
                 self._debug_id_map[id(m)] = f"m_{t}"
@@ -248,7 +266,7 @@ class MacroscopicStateEvolution:
         b = prev_b + zeta
         self.bias[t+1] = b
 
-        w = prev_w + h + chi * self.signal + (W @ gamma + xi) / (self.delta ** 0.5)
+        w = prev_w + h + chi * self.signal + W @ gamma + xi / (self.delta ** 0.5)
         self.weight[t+1] = w
 
         if self._debug:
@@ -267,7 +285,7 @@ class MacroscopicStateEvolution:
         b = self.bias[t].item()
         m = self.weight_signal_alignments[t]
         tau = torch.sqrt(torch.mean(self.weight[t] ** 2)).item()
-        err = compute_population_error_from(b, m, tau, self.rho)
+        err = compute_population_error_from(b, m, tau, self.sigma, self.p)
         self.error[t] = err
         return err
 
@@ -487,7 +505,8 @@ class MacroscopicStateEvolution:
                 self.algo_cfg.positive_margin, 
                 self.algo_cfg.negative_margin
             )
-            A = mask.double().mean().detach()
+            unlabeled = 1.0 - self.indicator
+            A = torch.sum(unlabeled * mask) / torch.sum(unlabeled)
     
         self.selection_rate[t] = A
 

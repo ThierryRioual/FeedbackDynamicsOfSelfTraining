@@ -20,57 +20,7 @@ def compute_projection_coef_from(X: torch.Tensor, x: torch.Tensor, rcond: Option
     # Detach to keep the solver completely out of the Autograd graph
     return solution.detach()
 
-
-import torch
-
 def compute_abstract_pseudo_residual_from(
-    preactivation: torch.Tensor,
-    label: torch.Tensor,
-    indicator: torch.Tensor,
-    selection_mask: torch.Tensor,
-    selection_rate: float,
-    coef: float,
-    rho: float,
-    eta: float,
-    loss_function  # Type hinted as your base LossFunction abstract class
-) -> torch.Tensor:
-    """
-    Core mathematical engine for computing the pseudo-residual g = -η ∇_r R(r).
-    Shared by theoretical State Evolution and empirical Gradient Descent tracking.
-    """
-    labeled_grad = loss_function.gradient(preactivation, label)
-    
-    # =========================================================================
-    # DIAGNOSTIC TEST: OVERWRITE WITH SMOOTH SURROGATES
-    # =========================================================================
-    
-    # 1. Smooth Pseudo-labels (Replaces torch.where)
-    # Using tanh creates a steep but differentiable transition between -1 and 1
-    y_pseudo = torch.tanh(10.0 * preactivation)
-    
-    # 2. Smooth Selection Mask (Replaces the passed-in Lipschitz/Hard mask)
-    # Assuming a margin kappa of 0.5 for the test. Adjust the 0.5 if your kappa is different!
-    kappa = 0.5 
-    selection_mask = torch.sigmoid(10.0 * (torch.abs(preactivation) - kappa))
-    
-    # Recompute the selection rate based on the new smooth mask so the scaling doesn't break
-    selection_rate = selection_mask.mean().detach()
-    # =========================================================================
-
-    unlabeled_grad = loss_function.gradient(preactivation, y_pseudo)
-    
-    safe_selection_rate = max(selection_rate, 1e-10)
-    
-    if coef == 0.0: 
-        return -eta * (indicator / rho) * labeled_grad
-    else:
-        return -eta * (
-            (indicator / rho) * labeled_grad + 
-            coef * ((1 - indicator) / (1 - rho)) * unlabeled_grad * (selection_mask / safe_selection_rate)
-        )
-
-
-def compute_abstract_pseudo_residual_from_2(
     preactivation: torch.Tensor,
     label: torch.Tensor,
     indicator: torch.Tensor,
@@ -95,21 +45,22 @@ def compute_abstract_pseudo_residual_from_2(
     # Smooth selection mask instead of Lipschitz
     # (A simple Gaussian bump or smooth step)
     
-    safe_selection_rate = max(selection_rate, 1e-10)
+    if selection_rate == 0.0:
+        print("Selection rate is zero")
     
     if coef == 0.0: 
         return -eta * (indicator / rho) * labeled_grad
     else:
         return -eta * (
             (indicator / rho) * labeled_grad + 
-            coef * ((1 - indicator) / (1 - rho)) * unlabeled_grad * (selection_mask / safe_selection_rate)
+            coef * ((1 - indicator) / (1 - rho)) * unlabeled_grad * (selection_mask / selection_rate)
         )
 
-def compute_population_error_from(b: float, m: float, tau: float, sigma: float, rho: float) -> float:
+def compute_population_error_from(b: float, m: float, tau: float, sigma: float, p: float) -> float:
     """
     Computes the population error.
     """
-    err = rho * norm.cdf((- b - m) / (tau * sigma)) + (1 - rho) * norm.cdf((b - m) / (tau * sigma))
+    err = p * norm.cdf((- b - m) / (tau * sigma)) + (1 - p) * norm.cdf((b - m) / (tau * sigma))
     return err
 
 import torch
