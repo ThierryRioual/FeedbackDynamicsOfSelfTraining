@@ -6,7 +6,7 @@ from typing import Callable, Optional
 
 from src.objectives import (
     LossFunction, Penalty, LogisticLoss, RidgePenalty, 
-    SelectionFunction, HardSelection, LipschitzSelection
+    SelectionFunction, HardSelection, LipschitzSelection, SmoothSelection
 )
 
 

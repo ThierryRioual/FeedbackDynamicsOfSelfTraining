@@ -148,7 +148,7 @@ class TestEvaluatorCallback:
             else:
                 unl_usage = 0.0
             
-        # 1. Callback uses the surrogate mask to match empirical and theoretical engines
+        # Use the selector's configured forward values (hard or surrogate).
         selection_mask = learner.cfg.selection_function(
             preactivations, positive_margin, negative_margin
         )
@@ -306,4 +306,3 @@ class TestEvaluatorCallback:
                 p=self.p
             )
             self.history_["population_error"].append(pop_err)
-       

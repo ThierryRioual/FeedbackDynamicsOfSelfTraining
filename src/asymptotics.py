@@ -7,7 +7,7 @@ import torch
 from scipy.stats import norm
 
 from dataclasses import dataclass, field
-from typing import Tuple, List, Dict
+from typing import Tuple, List, Dict, Optional
 
 from src.config import DataConfig, AlgorithmConfig
 from src.utils import compute_projection_coef_from, compute_abstract_pseudo_residual_from, compute_population_error_from
@@ -17,7 +17,11 @@ from src.utils import compute_projection_coef_from, compute_abstract_pseudo_resi
 @dataclass
 class MacroscopicStateEvolution:
     """
-    Numerically integrate the state evolution equations and compute the deterministic theoretical limits using Monte Carlo averaging.
+    Numerically integrate the state evolution equations using Monte Carlo averaging.
+
+    Bias handling is controlled exclusively by ``algo_cfg.include_bias``, as in
+    ``SelfTrainedGradientDescent``. If it is false, the effective intercept is
+    fixed at zero for the entire trajectory.
     """
     # Frozen configuration objects (same pattern as SelfTrainedGradientDescent / IsotropicGaussian)
     data_cfg: DataConfig
@@ -26,7 +30,7 @@ class MacroscopicStateEvolution:
     mc_seed: int = field(default=42) # monte carlo seed
     K: int = field(default=1000) # number of monte carlo samples
 
-    initial_bias: torch.float64 = field(default=0.0) # b_{init}
+    initial_bias: Optional[float] = field(default=0.0) # b_{init}
     initial_weight: torch.Tensor = field(default=None) # w_{init}
 
     _current_t: int = field(default=0) # current time step (for convenience)
@@ -70,7 +74,27 @@ class MacroscopicStateEvolution:
         self.label = (torch.rand(self.K) < self.data_cfg.label_prior).double() * 2 - 1 # transform to {+1, -1}
         self.indicator = (torch.rand(self.K) < self.data_cfg.supervision_ratio).double() # observation indicator 
 
-        self.initial_bias = torch.tensor(self.initial_bias, requires_grad=True)
+        initial_bias_value = (
+            0.0 if self.initial_bias is None else self.initial_bias
+        )
+        initial_bias = torch.as_tensor(
+            initial_bias_value,
+            dtype=torch.get_default_dtype(),
+        )
+        if initial_bias.numel() != 1:
+            raise ValueError("initial_bias must be scalar")
+        initial_bias = initial_bias.reshape(())
+        if not self.algo_cfg.include_bias:
+            if initial_bias.item() != 0.0:
+                raise ValueError(
+                    "initial_bias must be zero when include_bias=False"
+                )
+            initial_bias = torch.zeros_like(initial_bias)
+        self.initial_bias = (
+            initial_bias.detach().clone().requires_grad_(
+                self.algo_cfg.include_bias
+            )
+        )
 
         if self.initial_weight is None:
             self.initial_weight = torch.randn(self.K, requires_grad=True)
@@ -219,18 +243,22 @@ class MacroscopicStateEvolution:
 
         m = self.compute_weight_signal_alignment(t) # m
         omega = self.compute_forward_noise(t) # \omega
-        b = self.bias[t] # b_{t}
+        b = (
+            self.bias[t]
+            if self.algo_cfg.include_bias
+            else self.bias[t].new_zeros(())
+        )
+        ones = torch.ones_like(omega)
 
         pi = self.algo_cfg.get_pseudo_label_weight(min(t, self.T - 1)) # Handles the very last step 
 
         if t == 0: # Handles initial step t=0 (Empty sum)
-            r = b * torch.ones(self.K) + m * self.label + omega
+            r = b * ones + m * self.label + omega
 
         else: # Handles t>0
             gamma = self.compute_weight_memory(t) # \gamma^{[w]}
             G = torch.stack(self.residual[:t], dim=1) # G_{t-1} (residual matrix)
 
-            ones = torch.ones(self.K)
             r = b * ones + m * self.label + (G @ gamma) / (self.delta ** 0.5) + omega # r^{t}
 
             if self._debug:
@@ -263,7 +291,11 @@ class MacroscopicStateEvolution:
         W = torch.stack(self.weight[:t+1], dim=1) # W_{t} (residual matrix)
         h = self.get_decay_from(prev_w) # h (weight decay)
 
-        b = prev_b + zeta
+        b = (
+            prev_b + zeta
+            if self.algo_cfg.include_bias
+            else prev_b.new_zeros(())
+        )
         self.bias[t+1] = b
 
         w = prev_w + h + chi * self.signal + W @ gamma + xi / (self.delta ** 0.5)
@@ -282,7 +314,7 @@ class MacroscopicStateEvolution:
         Computes the error
         """
         self._check_time_access(t)
-        b = self.bias[t].item()
+        b = self.bias[t].item() if self.algo_cfg.include_bias else 0.0
         m = self.weight_signal_alignments[t]
         tau = torch.sqrt(torch.mean(self.weight[t] ** 2)).item()
         err = compute_population_error_from(b, m, tau, self.sigma, self.p)
@@ -335,16 +367,24 @@ class MacroscopicStateEvolution:
 
     def compute_residual_memory(self, t: int) -> torch.Tensor:
         """
-        Computes the pseudo-residual memory vector ($$ \gamma^{[g]} $$)
+        Computes the pseudo-residual memory vector ($$ \gamma^{[g]} $$).
+
+        For each forward-noise input, the required quantity is the mean
+        diagonal Jacobian, ``trace(J) / K``. A Rademacher trace probe computes
+        ``z.T @ J @ z / K`` through one vector-Jacobian product. It is exact for
+        the coordinatewise residual map used by state evolution and remains an
+        unbiased trace estimate if a future change introduces particle coupling.
         """
         self._check_time_access(t)
         current_residual = self.residual[t] # g^t
         noise_inputs = tuple(self.forward_noise[:t+1]) # Pass sequence of original tensors
 
+        trace_probe = self._response_trace_probe(current_residual, t)
+
         derivatives = torch.autograd.grad(
             outputs=current_residual,
             inputs=noise_inputs,
-            grad_outputs=torch.ones_like(current_residual),
+            grad_outputs=trace_probe,
             retain_graph=True,
             allow_unused=True
         )
@@ -352,14 +392,41 @@ class MacroscopicStateEvolution:
         mean_derivatives = []
         for d in derivatives:
             if d is None:
-                mean_derivatives.append(0.0)
+                mean_derivatives.append(current_residual.new_zeros(()))
             else:
-                mean_derivatives.append(torch.mean(d).item())
+                if d.shape != trace_probe.shape:
+                    raise RuntimeError(
+                        "Residual and forward-noise particles must have matching "
+                        "shapes to estimate the diagonal response."
+                    )
+                mean_derivatives.append(torch.mean(trace_probe * d))
         
-        gamma = torch.tensor(mean_derivatives, dtype=torch.float64).detach()
+        gamma = torch.stack(mean_derivatives).detach()
         self.residual_memory[t] = gamma
 
         return gamma
+
+    def _response_trace_probe(
+        self, reference: torch.Tensor, t: int
+    ) -> torch.Tensor:
+        """
+        Returns a deterministic local Rademacher probe without changing RNG state.
+        Implements the Hutchinson trace estimator for the diagonal Jacobian of the residual map.
+        """
+        generator = torch.Generator(device="cpu")
+        seed = (int(self.mc_seed) + 104729 * (t + 1)) % (2**63 - 1)
+        generator.manual_seed(seed)
+        probe = torch.randint(
+            low=0,
+            high=2,
+            size=reference.shape,
+            generator=generator,
+            dtype=torch.int8,
+            device="cpu",
+        )
+        return (2.0 * probe - 1.0).to(
+            dtype=reference.dtype, device=reference.device
+        )
 
     def compute_weight_signal_alignment(self, t: int) -> float:
         """
@@ -491,13 +558,17 @@ class MacroscopicStateEvolution:
 
         return xi 
 
-    def compute_selection_rate(self, t: int) -> float:
+    def compute_selection_rate(self, t: int) -> torch.Tensor:
         """
-        Computes the selection rate ($$ A_t $$)
+        Computes the unlabeled-conditional selection rate ($$ A_t $$).
+
+        The Monte Carlo estimate is a deterministic state parameter in the
+        scalar effective process. It is therefore detached before it is reused
+        in the differentiable pseudo-residual trajectory.
         """
         self._check_time_access(t)
         if self.preactivation[t] is None:
-            A = 0.0
+            A = self.indicator.new_zeros(())
         else:
             preactivation = self.preactivation[t]
             mask = self.algo_cfg.selection_function(
@@ -506,7 +577,13 @@ class MacroscopicStateEvolution:
                 self.algo_cfg.negative_margin
             )
             unlabeled = 1.0 - self.indicator
-            A = torch.sum(unlabeled * mask) / torch.sum(unlabeled)
+            denominator = torch.sum(unlabeled)
+            if denominator.item() == 0.0:
+                A = preactivation.new_zeros(())
+            else:
+                A = (torch.sum(unlabeled * mask) / denominator).detach()
+
+        A = A.detach()
     
         self.selection_rate[t] = A
 

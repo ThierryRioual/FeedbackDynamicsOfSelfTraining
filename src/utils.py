@@ -1,4 +1,6 @@
 from __future__ import annotations # Tells the interpreter to defer evaluating all type hints
+import math
+
 import torch
 from scipy.stats import norm
 from typing import Optional, TYPE_CHECKING
@@ -40,21 +42,30 @@ def compute_abstract_pseudo_residual_from(
     y_pseudo = torch.where(preactivation >= 0, 1.0, -1.0)
 
     unlabeled_grad = loss_function.gradient(preactivation, y_pseudo)
+    labeled_contribution = (indicator / rho) * labeled_grad
 
-    
-    # Smooth selection mask instead of Lipschitz
-    # (A simple Gaussian bump or smooth step)
-    
-    if selection_rate == 0.0:
-        print("Selection rate is zero")
-    
-    if coef == 0.0: 
-        return -eta * (indicator / rho) * labeled_grad
+    if coef == 0.0 or rho >= 1.0:
+        return -eta * labeled_contribution
+
+    if isinstance(selection_rate, torch.Tensor):
+        rate_value = selection_rate.detach().item()
     else:
-        return -eta * (
-            (indicator / rho) * labeled_grad + 
-            coef * ((1 - indicator) / (1 - rho)) * unlabeled_grad * (selection_mask / selection_rate)
-        )
+        rate_value = float(selection_rate)
+
+    if not math.isfinite(rate_value):
+        raise FloatingPointError(f"selection_rate must be finite, got {rate_value}")
+    if rate_value <= 0.0:
+        # The objective adopts the convention 0/0 = 0 when no unlabeled
+        # observation is selected, so its pseudo-labeled contribution is zero.
+        return -eta * labeled_contribution
+
+    unlabeled_contribution = (
+        coef
+        * ((1.0 - indicator) / (1.0 - rho))
+        * unlabeled_grad
+        * (selection_mask / selection_rate)
+    )
+    return -eta * (labeled_contribution + unlabeled_contribution)
 
 def compute_population_error_from(b: float, m: float, tau: float, sigma: float, p: float) -> float:
     """

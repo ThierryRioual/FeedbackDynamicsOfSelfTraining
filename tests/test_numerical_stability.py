@@ -1,13 +1,25 @@
-import sys
 import warnings
-from pathlib import Path
 
 import numpy as np
+import torch
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+from src.algorithms import SelfTrainedGradientDescent
+from src.config import AlgorithmConfig
+from src.objectives import LogisticLoss, RidgePenalty
 
-from algorithms import SelfTrainedGradientDescent
-from objectives import LogisticLoss, RidgePenalty
+
+def _algorithm_config(n_iterations, ramp_start, ramp_end, step_size):
+    return AlgorithmConfig(
+        n_iterations=n_iterations,
+        margin_threshold=1.0,
+        step_size=step_size,
+        penalty_param=0.01,
+        pseudo_label_param=0.1,
+        ramp_start=ramp_start,
+        ramp_end=ramp_end,
+        loss_function=LogisticLoss(),
+        penalty_function=RidgePenalty(),
+    )
 
 
 def test_self_training_does_not_emit_runtime_warnings():
@@ -19,43 +31,37 @@ def test_self_training_does_not_emit_runtime_warnings():
     with warnings.catch_warnings():
         warnings.simplefilter("error", RuntimeWarning)
         learner = SelfTrainedGradientDescent(
-            n_iterations=20,
-            margin_threshold=1.0,
-            step_size=0.5,
-            penalty_param=0.01,
-            pseudo_label_param=0.1,
-            ramp_start=5,
-            ramp_end=15,
-            loss_function=LogisticLoss(),
-            penalty_function=RidgePenalty(),
+            cfg=_algorithm_config(
+                n_iterations=20,
+                ramp_start=5,
+                ramp_end=15,
+                step_size=0.5,
+            )
         )
+        X_lab = torch.as_tensor(X_lab)
+        y_lab = torch.as_tensor(y_lab)
+        X_unl = torch.as_tensor(X_unl)
         learner.fit(X_lab, y_lab, X_unl)
-        scores = learner.score(X_unl)
+        fields = learner.compute_preactivation(X_unl)
 
-    assert np.isfinite(scores).all()
-    assert np.isfinite(learner.weights).all()
+    assert torch.isfinite(fields).all()
+    assert torch.isfinite(learner.weights).all()
 
 
-def test_score_is_safe_for_extreme_weights():
+def test_field_is_safe_for_extreme_weights():
     learner = SelfTrainedGradientDescent(
-        n_iterations=5,
-        margin_threshold=1.0,
-        step_size=0.1,
-        penalty_param=0.01,
-        pseudo_label_param=0.1,
-        ramp_start=1,
-        ramp_end=4,
-        loss_function=LogisticLoss(),
-        penalty_function=RidgePenalty(),
+        cfg=_algorithm_config(
+            n_iterations=5,
+            ramp_start=1,
+            ramp_end=4,
+            step_size=0.1,
+        )
     )
 
-    old_err_settings = np.seterr(all="raise")
-    try:
-        scores = learner.score(
-            np.array([[1.0, -2.0], [0.5, 1.5]]),
-            weights=np.array([1e300, -1e300, 1e300]),
-        )
-    finally:
-        np.seterr(**old_err_settings)
+    fields = learner.compute_preactivation(
+        torch.tensor([[1.0, -2.0], [0.5, 1.5]]),
+        bias=1e300,
+        weights=torch.tensor([1e300, -1e300]),
+    )
 
-    assert np.isfinite(scores).all()
+    assert torch.isfinite(fields).all()
