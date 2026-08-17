@@ -1,25 +1,24 @@
-from __future__ import annotations # Tells the interpreter to defer evaluating all type hints
+from __future__ import annotations
+
 import math
+import re
+import warnings
+from typing import Optional, TYPE_CHECKING
 
 import torch
 from scipy.stats import norm
-from typing import Optional, TYPE_CHECKING
+from torchviz import make_dot
 
 if TYPE_CHECKING:
     from src.asymptotics import MacroscopicStateEvolution
 
 def compute_projection_coef_from(X: torch.Tensor, x: torch.Tensor, rcond: Optional[float] = None) -> torch.Tensor:
+    """Return least-squares coefficients without forming normal equations.
+
+    This generic legacy helper is not used by the production state evolution,
+    which works in incremental orthogonal trajectory coordinates.
     """
-    Computes the projection coefficients of x onto the span of X.
-    Uses Tikhonov-regularized normal equations to guarantee autograd 
-    stability during State Evolution.
-    """
-    # torch.linalg.lstsq solves min ||X * alpha - x||^2 directly without forming X.T @ X
-    # It returns a named tuple; we extract the .solution attribute.
-    # rcond=None automatically cuts off precision errors using machine limits.
     solution = torch.linalg.lstsq(X, x, rcond=rcond).solution
-    
-    # Detach to keep the solver completely out of the Autograd graph
     return solution.detach()
 
 def compute_abstract_pseudo_residual_from(
@@ -31,17 +30,69 @@ def compute_abstract_pseudo_residual_from(
     coef: float,
     rho: float,
     eta: float,
-    loss_function  # Type hinted as your base LossFunction abstract class
+    loss_function,  # Type hinted as your base LossFunction abstract class
+    time_index: Optional[int] = None,
+    initial_pseudo_label: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     """
     Core mathematical engine for computing the pseudo-residual g = -η ∇_r R(r).
     Shared by theoretical State Evolution and empirical Gradient Descent tracking.
-    """
-    labeled_grad = loss_function.gradient(preactivation, label)
-    
-    y_pseudo = torch.where(preactivation >= 0, 1.0, -1.0)
 
-    unlabeled_grad = loss_function.gradient(preactivation, y_pseudo)
+    Existing callers that omit ``time_index`` retain the historical
+    ``sign(preactivation)`` pseudo-label rule.  A paper-faithful first update is
+    requested with ``time_index=0``; in that case an explicit exogenous
+    ``initial_pseudo_label`` is required whenever the unlabeled contribution is
+    active.  Later updates use ``sign(preactivation)``.
+    """
+    if not isinstance(preactivation, torch.Tensor):
+        raise TypeError("preactivation must be a torch.Tensor")
+    if not isinstance(label, torch.Tensor):
+        raise TypeError("label must be a torch.Tensor")
+    if not isinstance(indicator, torch.Tensor):
+        raise TypeError("indicator must be a torch.Tensor")
+    if not isinstance(selection_mask, torch.Tensor):
+        raise TypeError("selection_mask must be a torch.Tensor")
+    if label.shape != preactivation.shape:
+        raise ValueError(
+            "label and preactivation must have the same shape, "
+            f"got {tuple(label.shape)} and {tuple(preactivation.shape)}"
+        )
+    if selection_mask.shape != preactivation.shape:
+        raise ValueError(
+            "selection_mask and preactivation must have the same shape, "
+            f"got {tuple(selection_mask.shape)} and {tuple(preactivation.shape)}"
+        )
+    try:
+        indicator_shape = torch.broadcast_shapes(
+            indicator.shape, preactivation.shape
+        )
+    except RuntimeError as error:
+        raise ValueError(
+            "indicator must be scalar or broadcastable to the preactivation "
+            f"shape {tuple(preactivation.shape)}, got {tuple(indicator.shape)}"
+        ) from error
+    if indicator_shape != preactivation.shape:
+        raise ValueError(
+            "indicator must broadcast exactly to the preactivation shape, "
+            f"got {tuple(indicator_shape)} instead of {tuple(preactivation.shape)}"
+        )
+    if label.device != preactivation.device:
+        raise ValueError("label and preactivation must be on the same device")
+    if indicator.device != preactivation.device:
+        raise ValueError("indicator and preactivation must be on the same device")
+    if selection_mask.device != preactivation.device:
+        raise ValueError(
+            "selection_mask and preactivation must be on the same device"
+        )
+    if not torch.all((label == 1) | (label == -1)):
+        raise ValueError("label entries must belong to {-1, +1}")
+    if time_index is not None:
+        if isinstance(time_index, bool) or not isinstance(time_index, int):
+            raise TypeError("time_index must be a nonnegative integer or None")
+        if time_index < 0:
+            raise ValueError("time_index must be nonnegative")
+
+    labeled_grad = loss_function.gradient(preactivation, label)
     labeled_contribution = (indicator / rho) * labeled_grad
 
     if coef == 0.0 or rho >= 1.0:
@@ -59,6 +110,36 @@ def compute_abstract_pseudo_residual_from(
         # observation is selected, so its pseudo-labeled contribution is zero.
         return -eta * labeled_contribution
 
+    if time_index == 0:
+        if initial_pseudo_label is None:
+            raise ValueError(
+                "initial_pseudo_label is required for an active unlabeled "
+                "contribution at time_index=0"
+            )
+        if not isinstance(initial_pseudo_label, torch.Tensor):
+            raise TypeError("initial_pseudo_label must be a torch.Tensor")
+        if initial_pseudo_label.shape != preactivation.shape:
+            raise ValueError(
+                "initial_pseudo_label and preactivation must have the same "
+                f"shape, got {tuple(initial_pseudo_label.shape)} and "
+                f"{tuple(preactivation.shape)}"
+            )
+        if initial_pseudo_label.device != preactivation.device:
+            raise ValueError(
+                "initial_pseudo_label and preactivation must be on the same device"
+            )
+        if not torch.all(
+            (initial_pseudo_label == 1) | (initial_pseudo_label == -1)
+        ):
+            raise ValueError(
+                "initial_pseudo_label entries must belong to {-1, +1}"
+            )
+        y_pseudo = initial_pseudo_label.to(dtype=preactivation.dtype)
+    else:
+        y_pseudo = torch.where(preactivation >= 0, 1.0, -1.0)
+
+    unlabeled_grad = loss_function.gradient(preactivation, y_pseudo)
+
     unlabeled_contribution = (
         coef
         * ((1.0 - indicator) / (1.0 - rho))
@@ -71,12 +152,25 @@ def compute_population_error_from(b: float, m: float, tau: float, sigma: float, 
     """
     Computes the population error.
     """
-    err = p * norm.cdf((- b - m) / (tau * sigma)) + (1 - p) * norm.cdf((b - m) / (tau * sigma))
-    return err
+    b = float(b)
+    m = float(m)
+    tau = float(tau)
+    sigma = float(sigma)
+    p = float(p)
+    noise_scale = tau * sigma
 
-import torch
-import re
-from torchviz import make_dot
+    if noise_scale == 0.0:
+        # The score is deterministic conditional on the class.  The classifier
+        # uses torch.where(score >= 0, +1, -1), so a zero score is classified as
+        # positive.  Hence equality is an error only for the negative class.
+        positive_class_error = float(b + m < 0.0)
+        negative_class_error = float(b - m >= 0.0)
+        return p * positive_class_error + (1.0 - p) * negative_class_error
+
+    err = p * norm.cdf((-b - m) / noise_scale) + (1.0 - p) * norm.cdf(
+        (b - m) / noise_scale
+    )
+    return float(err)
 
 def plot_autograd_dag(
     se: MacroscopicStateEvolution, 
@@ -85,9 +179,11 @@ def plot_autograd_dag(
     rankdir: str = 'TB',
     dpi: str = '300'
 ):
-    """
-    Master plotting function to visualize the State Evolution Autograd DAG.
-    Automatically extracts history up to step t and annotates the graph.
+    """Legacy visualizer for a gradient-enabled state-evolution trajectory.
+
+    The production state evolution is deliberately graph-free.  Calling this
+    helper on production output therefore emits a warning and can only render
+    disconnected tensor leaves; use the orthogonal-basis diagnostics instead.
     """
     # 1. Base static leaf nodes
     params = {
@@ -109,14 +205,14 @@ def plot_autograd_dag(
         # Variables that update in the forward/memory passes (go up to t)
         if i <= t:
             if i < len(se.forward_noise) and isinstance(se.forward_noise[i], torch.Tensor):
-                params[f"omega^{i}"] = se.forward_noise[i]
+                params[f"q^{i}"] = se.forward_noise[i]
             if i < len(se.backward_noise) and isinstance(se.backward_noise[i], torch.Tensor):
-                params[f"xi^{i}"] = se.backward_noise[i]
+                params[f"p^{i}"] = se.backward_noise[i]
 
             if i < len(se.weight_memory) and isinstance(se.weight_memory[i], torch.Tensor):
-                params[f"gamma^[w]_{i}"] = se.weight_memory[i]
+                params[f"phi^[w]_{i}"] = se.weight_memory[i]
             if i < len(se.residual_memory) and isinstance(se.residual_memory[i], torch.Tensor):
-                params[f"gamma^[g]_{i}"] = se.residual_memory[i]
+                params[f"phi^[g]_{i}"] = se.residual_memory[i]
 
             if i < len(se.residual) and isinstance(se.residual[i], torch.Tensor):
                 params[f"g^{i}"] = se.residual[i]
@@ -144,6 +240,14 @@ def plot_autograd_dag(
         if f"w^{i}" in params: target_tensors.append(params[f"w^{i}"])
         
     outputs = tuple(target_tensors)
+    if outputs and not any(tensor.requires_grad for tensor in outputs):
+        warnings.warn(
+            "The production state evolution is graph-free; plot_autograd_dag "
+            "can only render disconnected tensor leaves. Inspect B_w, B_g, "
+            "Theta_w, Theta_g, Q_w, P_g, and the rank diagnostics instead.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
 
     # 4. Build the combined memory ID map for labeling
     id_map = {id(tensor): name for name, tensor in params.items()}

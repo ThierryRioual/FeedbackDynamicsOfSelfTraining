@@ -51,8 +51,8 @@ class AlgorithmConfig:
     step_size: float           # \eta
     penalty_param: float       # \lambda
     pseudo_label_param: float  # \pi
-    ramp_start: int            # T_0
-    ramp_end: int              # T_1
+    ramp_start: Optional[int] = None            # T_0
+    ramp_end: Optional[int] = None           # T_1
     margin_threshold: Optional[float] = None  # \kappa
     positive_margin: Optional[float] = None
     negative_margin: Optional[float] = None
@@ -77,17 +77,20 @@ class AlgorithmConfig:
         assert self.positive_margin is not None and self.negative_margin is not None, \
             "Must specify either margin_threshold, or both positive_margin and negative_margin."
 
-        schedule = []
-        ramp_range = self.ramp_end - self.ramp_start
-        
-        for t in range(self.n_iterations):
-            if t <= self.ramp_start:
-                val = 0.0
-            elif t >= self.ramp_end:
-                val = self.pseudo_label_param
-            else:
-                val = self.pseudo_label_param * (t - self.ramp_start) / ramp_range
-            schedule.append(float(val))
+        if self.ramp_start is None or self.ramp_end is None:
+            schedule = [self.pseudo_label_param] * self.n_iterations
+        else:
+            schedule = []
+            ramp_range = self.ramp_end - self.ramp_start
+            
+            for t in range(self.n_iterations):
+                if t <= self.ramp_start:
+                    val = 0.0
+                elif t >= self.ramp_end:
+                    val = self.pseudo_label_param
+                else:
+                    val = self.pseudo_label_param * (t - self.ramp_start) / ramp_range
+                schedule.append(float(val))    
 
         # Necessary pattern to assign fields on frozen dataclasses
         object.__setattr__(self, "pseudo_label_param_schedule_", schedule)

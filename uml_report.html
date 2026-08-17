@@ -1,0 +1,779 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>UML Class Diagram — Self-Training Framework</title>
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+
+    :root {
+      --bg: #ffffff;
+      --text: #1a1a2e;
+      --accent: #4a9eff;
+      --accent2: #ff9f43;
+      --muted: #64748b;
+      --border: #e2e8f0;
+      --code-bg: #f8fafc;
+      --header-bg: #0f172a;
+      --tag-blue: #dbeafe;
+      --tag-blue-text: #1d4ed8;
+      --tag-green: #dcfce7;
+      --tag-green-text: #166534;
+      --tag-orange: #ffedd5;
+      --tag-orange-text: #9a3412;
+      --tag-purple: #ede9fe;
+      --tag-purple-text: #6d28d9;
+      --tag-pink: #fce7f3;
+      --tag-pink-text: #9d174d;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: 'Inter', sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      font-size: 13px;
+      line-height: 1.65;
+    }
+
+    /* ── COVER ──────────────────────────────────────────────────── */
+    .cover {
+      background: var(--header-bg);
+      color: white;
+      padding: 60px 64px 48px;
+      page-break-after: always;
+    }
+
+    .cover .badge {
+      display: inline-block;
+      background: rgba(74,158,255,0.2);
+      border: 1px solid rgba(74,158,255,0.4);
+      color: #93c5fd;
+      padding: 3px 12px;
+      border-radius: 999px;
+      font-size: 11px;
+      font-weight: 500;
+      letter-spacing: .06em;
+      text-transform: uppercase;
+      margin-bottom: 20px;
+    }
+
+    .cover h1 {
+      font-size: 36px;
+      font-weight: 700;
+      line-height: 1.15;
+      margin-bottom: 10px;
+      letter-spacing: -.5px;
+    }
+
+    .cover h1 span { color: #60a5fa; }
+
+    .cover .subtitle {
+      color: #94a3b8;
+      font-size: 15px;
+      margin-bottom: 36px;
+    }
+
+    .cover .meta-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 16px;
+      border-top: 1px solid #1e293b;
+      padding-top: 28px;
+    }
+
+    .cover .meta-item label {
+      display: block;
+      font-size: 10px;
+      text-transform: uppercase;
+      letter-spacing: .08em;
+      color: #64748b;
+      margin-bottom: 4px;
+    }
+
+    .cover .meta-item value {
+      font-size: 13px;
+      color: #e2e8f0;
+      font-weight: 500;
+    }
+
+    /* ── LAYOUT ─────────────────────────────────────────────────── */
+    .page {
+      padding: 40px 64px;
+      max-width: 1100px;
+      margin: 0 auto;
+    }
+
+    /* ── SECTION HEADERS ─────────────────────────────────────────── */
+    .section-header {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      margin-bottom: 20px;
+      margin-top: 44px;
+      padding-bottom: 10px;
+      border-bottom: 2px solid var(--border);
+    }
+
+    .section-header:first-child { margin-top: 0; }
+
+    .section-num {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      width: 28px;
+      height: 28px;
+      background: var(--accent);
+      color: white;
+      border-radius: 6px;
+      font-size: 12px;
+      font-weight: 700;
+      flex-shrink: 0;
+    }
+
+    .section-header h2 {
+      font-size: 18px;
+      font-weight: 700;
+      color: var(--text);
+      letter-spacing: -.3px;
+    }
+
+    .section-header p {
+      font-size: 12px;
+      color: var(--muted);
+      margin-left: auto;
+    }
+
+    /* ── DIAGRAM CONTAINERS ──────────────────────────────────────── */
+    .diagram-card {
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      overflow: hidden;
+      margin-bottom: 28px;
+    }
+
+    .diagram-card .card-header {
+      background: #f8fafc;
+      padding: 10px 16px;
+      border-bottom: 1px solid var(--border);
+      font-size: 11px;
+      font-weight: 600;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: .06em;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .diagram-card .card-header::before {
+      content: '';
+      width: 8px; height: 8px;
+      border-radius: 50%;
+      background: var(--accent);
+    }
+
+    .diagram-card .diagram-body {
+      padding: 24px;
+      background: white;
+      overflow-x: auto;
+    }
+
+    .mermaid {
+      display: flex;
+      justify-content: center;
+    }
+
+    /* ── TABLES ─────────────────────────────────────────────────── */
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 12px;
+      margin-top: 4px;
+    }
+
+    thead tr {
+      background: var(--header-bg);
+      color: white;
+    }
+
+    thead th {
+      padding: 10px 14px;
+      text-align: left;
+      font-weight: 600;
+      font-size: 11px;
+      letter-spacing: .04em;
+      text-transform: uppercase;
+    }
+
+    tbody tr { border-bottom: 1px solid var(--border); }
+    tbody tr:nth-child(even) { background: #f8fafc; }
+    tbody tr:hover { background: #f1f5f9; }
+
+    tbody td {
+      padding: 10px 14px;
+      vertical-align: top;
+    }
+
+    tbody td:first-child {
+      font-weight: 600;
+      color: var(--accent);
+      white-space: nowrap;
+    }
+
+    code {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 11px;
+      background: var(--code-bg);
+      border: 1px solid var(--border);
+      padding: 1px 5px;
+      border-radius: 3px;
+      color: #e11d48;
+    }
+
+    /* ── DESIGN PATTERN CARDS ────────────────────────────────────── */
+    .pattern-grid {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 14px;
+      margin-top: 4px;
+    }
+
+    .pattern-card {
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 14px 16px;
+      background: #fafafa;
+    }
+
+    .pattern-card .pattern-name {
+      font-weight: 700;
+      font-size: 12px;
+      margin-bottom: 6px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .pattern-tag {
+      display: inline-block;
+      padding: 1px 8px;
+      border-radius: 4px;
+      font-size: 10px;
+      font-weight: 600;
+    }
+
+    .tag-blue   { background: var(--tag-blue);   color: var(--tag-blue-text); }
+    .tag-green  { background: var(--tag-green);  color: var(--tag-green-text); }
+    .tag-orange { background: var(--tag-orange); color: var(--tag-orange-text); }
+    .tag-purple { background: var(--tag-purple); color: var(--tag-purple-text); }
+    .tag-pink   { background: var(--tag-pink);   color: var(--tag-pink-text); }
+
+    .pattern-card p {
+      font-size: 12px;
+      color: var(--muted);
+      line-height: 1.55;
+    }
+
+    /* ── FILE INDEX ──────────────────────────────────────────────── */
+    .file-index {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 10px;
+      margin-top: 4px;
+    }
+
+    .file-chip {
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 10px 12px;
+      font-size: 11px;
+    }
+
+    .file-chip .fname {
+      font-family: 'JetBrains Mono', monospace;
+      font-weight: 600;
+      font-size: 11px;
+      margin-bottom: 3px;
+    }
+
+    .file-chip .frole {
+      color: var(--muted);
+      font-size: 10px;
+      line-height: 1.4;
+    }
+
+    /* ── PRINT ──────────────────────────────────────────────────── */
+    @media print {
+      body { font-size: 11px; }
+      .cover { page-break-after: always; }
+      .page-break { page-break-before: always; }
+      .diagram-card { page-break-inside: avoid; }
+      .pattern-card { page-break-inside: avoid; }
+      @page {
+        margin: 12mm 14mm;
+        size: A4 landscape;
+      }
+    }
+  </style>
+</head>
+<body>
+
+<!-- ════════════════════════════════════════════════════════════════
+     COVER PAGE
+════════════════════════════════════════════════════════════════ -->
+<div class="cover">
+  <div class="badge">Architecture Report</div>
+  <h1>UML Class Diagram<br><span>Self-Training Framework</span></h1>
+  <p class="subtitle">Complete architecture of the <code style="background:rgba(255,255,255,.1);border-color:rgba(255,255,255,.2);color:#93c5fd">src/</code> package — classes, interfaces, methods, relationships, and design patterns</p>
+  <div class="meta-grid">
+    <div class="meta-item">
+      <label>Repository</label>
+      <value>implementation / src</value>
+    </div>
+    <div class="meta-item">
+      <label>Source Modules</label>
+      <value>8 Python files</value>
+    </div>
+    <div class="meta-item">
+      <label>Classes / ABCs</label>
+      <value>7 classes · 3 ABCs · 4 concrete</value>
+    </div>
+    <div class="meta-item">
+      <label>Generated</label>
+      <value id="datestamp"></value>
+    </div>
+    <div class="meta-item">
+      <label>Framework</label>
+      <value>PyTorch · Mermaid 10</value>
+    </div>
+    <div class="meta-item">
+      <label>Design Patterns</label>
+      <value>Strategy · Observer · Shared Engine</value>
+    </div>
+  </div>
+</div>
+
+<!-- ════════════════════════════════════════════════════════════════
+     MAIN CONTENT
+════════════════════════════════════════════════════════════════ -->
+<div class="page">
+
+  <!-- FILE INDEX -->
+  <div class="section-header">
+    <div class="section-num">0</div>
+    <h2>Source File Index</h2>
+  </div>
+
+  <div class="file-index">
+    <div class="file-chip">
+      <div class="fname" style="color:#4a9eff">objectives.py</div>
+      <div class="frole">Abstract interfaces: LossFunction, Penalty, SelectionFunction + concrete implementations</div>
+    </div>
+    <div class="file-chip">
+      <div class="fname" style="color:#ff9f43">config.py</div>
+      <div class="frole">Frozen dataclasses: DataConfig (population) &amp; AlgorithmConfig (hyperparameters)</div>
+    </div>
+    <div class="file-chip">
+      <div class="fname" style="color:#a29bfe">validation.py</div>
+      <div class="frole">Input validation guards for data shapes, DGP params, gradient integrity</div>
+    </div>
+    <div class="file-chip">
+      <div class="fname" style="color:#00b894">dgp.py</div>
+      <div class="frole">IsotropicGaussian — samples labeled / unlabeled / test splits</div>
+    </div>
+    <div class="file-chip">
+      <div class="fname" style="color:#fd79a8">algorithms.py</div>
+      <div class="frole">SelfTrainedGradientDescent — finite-dimensional Algorithm 1</div>
+    </div>
+    <div class="file-chip">
+      <div class="fname" style="color:#e17055">asymptotics.py</div>
+      <div class="frole">MacroscopicStateEvolution — Monte Carlo SE integration</div>
+    </div>
+    <div class="file-chip">
+      <div class="fname" style="color:#6c5ce7">callbacks.py</div>
+      <div class="frole">TestEvaluatorCallback — 16-metric tracker injected into GD loop</div>
+    </div>
+    <div class="file-chip">
+      <div class="fname" style="color:#f39c12">utils.py</div>
+      <div class="frole">Shared math engine, projection solver, population error, autograd plotter</div>
+    </div>
+  </div>
+
+
+  <!-- SECTION 1: CLASS DIAGRAM -->
+  <div class="section-header" style="margin-top:40px">
+    <div class="section-num">1</div>
+    <h2>Full Class Diagram</h2>
+    <p>interfaces · dataclasses · composition · usage</p>
+  </div>
+
+  <div class="diagram-card">
+    <div class="card-header">UML Class Diagram — all layers</div>
+    <div class="diagram-body">
+      <div class="mermaid">
+classDiagram
+    direction TB
+
+    class LossFunction {
+        &lt;&lt;abstract&gt;&gt;
+        +evaluate(r Tensor, y Tensor) Tensor
+        +gradient(r Tensor, y Tensor) Tensor
+    }
+    class Penalty {
+        &lt;&lt;abstract&gt;&gt;
+        +evaluate(w Tensor) Tensor
+        +gradient(w Tensor) Tensor
+    }
+    class SelectionFunction {
+        &lt;&lt;abstract&gt;&gt;
+        +__call__(preactivation Tensor, pos_margin float, neg_margin float) Tensor
+    }
+    class LogisticLoss {
+        +evaluate(r Tensor, y Tensor) Tensor
+        +gradient(r Tensor, y Tensor) Tensor
+    }
+    class RidgePenalty {
+        +evaluate(w Tensor) Tensor
+        +gradient(w Tensor) Tensor
+    }
+    class HardSelection {
+        +__call__(preactivation Tensor, pos_margin float, neg_margin float) Tensor
+    }
+    class LipschitzSelection {
+        -epsilon float
+        +__init__(epsilon float)
+        +__call__(preactivation Tensor, pos_margin float, neg_margin float) Tensor
+    }
+    LossFunction &lt;|-- LogisticLoss
+    Penalty &lt;|-- RidgePenalty
+    SelectionFunction &lt;|-- HardSelection
+    SelectionFunction &lt;|-- LipschitzSelection
+
+    class DataConfig {
+        &lt;&lt;dataclass frozen&gt;&gt;
+        +scale float
+        +label_prior float
+        +supervision_ratio float
+        +data_to_dimension_ratio float
+        +signal_law Callable
+        +__post_init__()
+    }
+    class AlgorithmConfig {
+        &lt;&lt;dataclass frozen&gt;&gt;
+        +n_iterations int
+        +step_size float
+        +penalty_param float
+        +pseudo_label_param float
+        +ramp_start int
+        +ramp_end int
+        +margin_threshold float
+        +positive_margin float
+        +negative_margin float
+        +include_bias bool
+        +loss_function LossFunction
+        +penalty_function Penalty
+        +selection_function SelectionFunction
+        -pseudo_label_param_schedule_ list
+        +__post_init__()
+        +get_pseudo_label_weight(t int) float
+    }
+    AlgorithmConfig *-- LossFunction
+    AlgorithmConfig *-- Penalty
+    AlgorithmConfig *-- SelectionFunction
+
+    class IsotropicGaussian {
+        &lt;&lt;dataclass&gt;&gt;
+        +cfg DataConfig
+        +n_train int
+        +n_test int
+        +dimensions int
+        +seed int
+        +signal_vector Tensor
+        -rng Generator
+        -_mu Tensor
+        +n_labeled int
+        +n_unlabeled int
+        +empirical_data_to_dimension_ratio float
+        -_sample_class(n_samples int, sign int) Tensor
+        +sample(stratified bool) Tuple
+    }
+    IsotropicGaussian *-- DataConfig
+
+    class SelfTrainedGradientDescent {
+        &lt;&lt;dataclass&gt;&gt;
+        +cfg AlgorithmConfig
+        +callback Callable
+        +bias float
+        +weights Tensor
+        +prev_preactivations_ Tensor
+        -_compute_empirical_risk_gradient(preactivations_lab, Y_lab, preactivations_unl, pi) Tensor
+        -_compute_gradient_step(bias, weights, X_lab, Y_lab, X_unl, pi) Tuple
+        +fit(X_lab, Y_lab, X_unl, initial_bias, initial_weights) None
+        +compute_preactivation(X, bias, weights) Tensor
+        +predict(X, bias, weights) Tensor
+    }
+    SelfTrainedGradientDescent *-- AlgorithmConfig
+
+    class MacroscopicStateEvolution {
+        &lt;&lt;dataclass&gt;&gt;
+        +data_cfg DataConfig
+        +algo_cfg AlgorithmConfig
+        +mc_seed int
+        +K int
+        +signal Tensor
+        +label Tensor
+        +indicator Tensor
+        +bias List
+        +weight List
+        +preactivation List
+        +residual List
+        +forward_noise List
+        +backward_noise List
+        +weight_memory List
+        +residual_memory List
+        +weight_signal_alignments List
+        +label_residual_alignments List
+        +mean_residual List
+        +selection_rate List
+        +error List
+        +T int
+        +rho float
+        +delta float
+        +eta float
+        +compute_trajectory() None
+        +step(t int) None
+        +forward_pass(t int) Tuple
+        +backward_pass(t int) Tuple
+        +compute_error(t int) float
+        +compute_forward_noise(t int) Tensor
+        +compute_backward_noise(t int) Tensor
+        +compute_selection_rate(t int) float
+    }
+    MacroscopicStateEvolution *-- DataConfig
+    MacroscopicStateEvolution *-- AlgorithmConfig
+
+    class TestEvaluatorCallback {
+        &lt;&lt;dataclass&gt;&gt;
+        +X_lab Tensor
+        +Y_lab Tensor
+        +X_unl Tensor
+        +Y_unl Tensor
+        +X_test Tensor
+        +Y_test Tensor
+        +mu Tensor
+        +sigma float
+        +rho float
+        +metrics Set
+        -history_ Dict
+        +__post_init__()
+        -_compute_pseudo_residual(...) Tensor
+        +__call__(learner, t int) None
+    }
+    SelfTrainedGradientDescent ..> TestEvaluatorCallback : callback
+    TestEvaluatorCallback ..> SelfTrainedGradientDescent : observes
+      </div>
+    </div>
+  </div>
+
+
+  <!-- SECTION 2: DEPENDENCY GRAPH -->
+  <div class="section-header page-break">
+    <div class="section-num">2</div>
+    <h2>Module Dependency Graph</h2>
+    <p>import relationships across all 8 source files</p>
+  </div>
+
+  <div class="diagram-card">
+    <div class="card-header">Import graph — arrows show import direction</div>
+    <div class="diagram-body">
+      <div class="mermaid">
+graph LR
+    subgraph src["📦 src/"]
+        OBJ["objectives.py\nABCs + implementations"]
+        CFG["config.py\nDataConfig · AlgorithmConfig"]
+        VAL["validation.py\nInput guards"]
+        DGP["dgp.py\nIsotropicGaussian"]
+        ALG["algorithms.py\nSelfTrainedGD"]
+        ASY["asymptotics.py\nMacroStateEvolution"]
+        CB["callbacks.py\nTestEvaluatorCallback"]
+        UTL["utils.py\nShared math engine"]
+    end
+    CFG -->|imports| OBJ
+    DGP -->|imports| CFG
+    ALG -->|imports| CFG
+    ALG -->|imports| VAL
+    ALG -->|imports| OBJ
+    ASY -->|imports| CFG
+    ASY -->|imports| UTL
+    CB  -->|imports| ALG
+    CB  -->|imports| UTL
+    UTL -. "TYPE_CHECKING only" .-> ASY
+
+    style OBJ fill:#4a9eff,color:#fff,stroke:#2563eb
+    style CFG fill:#ff9f43,color:#fff,stroke:#d97706
+    style VAL fill:#a29bfe,color:#fff,stroke:#7c3aed
+    style DGP fill:#00b894,color:#fff,stroke:#059669
+    style ALG fill:#fd79a8,color:#fff,stroke:#be185d
+    style ASY fill:#e17055,color:#fff,stroke:#c2410c
+    style CB  fill:#6c5ce7,color:#fff,stroke:#4c1d95
+    style UTL fill:#ffeaa7,color:#333,stroke:#b45309
+      </div>
+    </div>
+  </div>
+
+
+  <!-- SECTION 3: LAYER OVERVIEW TABLE -->
+  <div class="section-header">
+    <div class="section-num">3</div>
+    <h2>Architectural Layer Overview</h2>
+  </div>
+
+  <table>
+    <thead>
+      <tr>
+        <th>Layer</th>
+        <th>Module</th>
+        <th>Key Classes / Functions</th>
+        <th>Role</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>Abstract Interfaces</td>
+        <td><code>objectives.py</code></td>
+        <td><code>LossFunction</code> · <code>Penalty</code> · <code>SelectionFunction</code><br><code>LogisticLoss</code> · <code>RidgePenalty</code> · <code>HardSelection</code> · <code>LipschitzSelection</code></td>
+        <td>Defines pluggable strategies for loss computation, regularisation, and pseudo-label selection thresholding</td>
+      </tr>
+      <tr>
+        <td>Configuration</td>
+        <td><code>config.py</code></td>
+        <td><code>DataConfig</code> · <code>AlgorithmConfig</code></td>
+        <td>Immutable frozen dataclasses separating population-level "laws of the universe" from algorithm hyperparameters. <code>AlgorithmConfig</code> precomputes the π-schedule on construction.</td>
+      </tr>
+      <tr>
+        <td>Validation</td>
+        <td><code>validation.py</code></td>
+        <td><code>validate_self_training_data</code><br><code>validate_dgp_parameters</code><br><code>validate_gradient_step</code></td>
+        <td>Defensive guards checking tensor shapes, dtypes, finiteness, and numerical integrity before entering hot loops</td>
+      </tr>
+      <tr>
+        <td>Data Generation</td>
+        <td><code>dgp.py</code></td>
+        <td><code>IsotropicGaussian</code></td>
+        <td>Samples labeled/unlabeled/test splits from a Gaussian mixture model. Supports both stratified (zero-variance) and pure i.i.d. modes for clean SE comparison</td>
+      </tr>
+      <tr>
+        <td>Empirical Algorithm</td>
+        <td><code>algorithms.py</code></td>
+        <td><code>SelfTrainedGradientDescent</code></td>
+        <td>Finite-dimensional implementation of Algorithm 1. Runs gradient descent with pseudo-labeling, calls the optional callback after each iteration</td>
+      </tr>
+      <tr>
+        <td>Theoretical SE</td>
+        <td><code>asymptotics.py</code></td>
+        <td><code>MacroscopicStateEvolution</code></td>
+        <td>Integrates the deterministic high-dimensional state evolution equations via Monte Carlo. Maintains full trajectory history (preactivation, residual, noise, memory vectors) for autograd through the recursion</td>
+      </tr>
+      <tr>
+        <td>Callbacks</td>
+        <td><code>callbacks.py</code></td>
+        <td><code>TestEvaluatorCallback</code></td>
+        <td>Observer injected into the GD loop. Lazily computes up to 16 metrics (errors, residual alignments, norms, selection rates, population error) using a shared cache to avoid redundant forward passes</td>
+      </tr>
+      <tr>
+        <td>Utilities</td>
+        <td><code>utils.py</code></td>
+        <td><code>compute_abstract_pseudo_residual_from</code><br><code>compute_projection_coef_from</code><br><code>compute_population_error_from</code><br><code>plot_autograd_dag</code></td>
+        <td>Shared math engine called by both <code>MacroscopicStateEvolution</code> (theoretical) and <code>TestEvaluatorCallback</code> (empirical), guaranteeing mathematical equivalence between the two tracks</td>
+      </tr>
+    </tbody>
+  </table>
+
+
+  <!-- SECTION 4: DESIGN PATTERNS -->
+  <div class="section-header">
+    <div class="section-num">4</div>
+    <h2>Design Patterns</h2>
+  </div>
+
+  <div class="pattern-grid">
+    <div class="pattern-card">
+      <div class="pattern-name">
+        <span class="pattern-tag tag-blue">Strategy</span>
+        Pluggable Objectives
+      </div>
+      <p><code>AlgorithmConfig</code> composes pluggable <code>LossFunction</code>, <code>Penalty</code>, and <code>SelectionFunction</code> instances. Switching from logistic to hinge loss, or from hard to Lipschitz thresholding, requires zero changes to the algorithm.</p>
+    </div>
+
+    <div class="pattern-card">
+      <div class="pattern-name">
+        <span class="pattern-tag tag-purple">Observer</span>
+        Callback Injection
+      </div>
+      <p><code>TestEvaluatorCallback</code> is injected into <code>SelfTrainedGradientDescent.callback</code> and called after every gradient step (<code>t = 0 … T</code>). The algorithm knows nothing about what metrics are tracked.</p>
+    </div>
+
+    <div class="pattern-card">
+      <div class="pattern-name">
+        <span class="pattern-tag tag-green">Shared Engine</span>
+        Theoretical–Empirical Parity
+      </div>
+      <p>Both <code>MacroscopicStateEvolution</code> and <code>TestEvaluatorCallback</code> delegate pseudo-residual computation to the same <code>compute_abstract_pseudo_residual_from()</code> in <code>utils.py</code>, ensuring bit-for-bit mathematical equivalence between theory and simulation.</p>
+    </div>
+
+    <div class="pattern-card">
+      <div class="pattern-name">
+        <span class="pattern-tag tag-orange">Frozen Configs</span>
+        Immutable Hyperparameters
+      </div>
+      <p><code>DataConfig</code> and <code>AlgorithmConfig</code> are <code>frozen=True</code> dataclasses, making them hashable and thread-safe. Mutation attempts raise <code>FrozenInstanceError</code> at runtime, cleanly separating config from mutable algorithm state.</p>
+    </div>
+
+    <div class="pattern-card">
+      <div class="pattern-name">
+        <span class="pattern-tag tag-pink">TYPE_CHECKING Guard</span>
+        Circular Import Resolution
+      </div>
+      <p><code>utils.py</code> uses <code>if TYPE_CHECKING: from src.asymptotics import MacroscopicStateEvolution</code> combined with <code>from __future__ import annotations</code> to provide IDE type hints for <code>plot_autograd_dag</code> without creating a circular import at runtime.</p>
+    </div>
+
+    <div class="pattern-card">
+      <div class="pattern-name">
+        <span class="pattern-tag tag-blue">Lazy Cache</span>
+        Amortised Preactivations
+      </div>
+      <p><code>TestEvaluatorCallback.__call__</code> uses closure-based lazy getters (<code>get_preactivations_lab()</code>, etc.) backed by a per-call <code>cache</code> dict. Each forward pass is computed at most once per iteration, even when multiple metrics share the same data split.</p>
+    </div>
+  </div>
+
+</div><!-- end .page -->
+
+<script>
+  document.getElementById('datestamp').textContent = new Date().toLocaleDateString('en-US', {
+    year: 'numeric', month: 'long', day: 'numeric'
+  });
+
+  mermaid.initialize({
+    startOnLoad: true,
+    theme: 'base',
+    themeVariables: {
+      primaryColor: '#e8f4ff',
+      primaryTextColor: '#1a1a2e',
+      primaryBorderColor: '#4a9eff',
+      lineColor: '#64748b',
+      secondaryColor: '#fff7ed',
+      tertiaryColor: '#f0fdf4',
+      edgeLabelBackground: '#ffffff',
+      fontSize: '13px'
+    },
+    flowchart: { curve: 'basis', htmlLabels: true },
+    classDiagram: { useMaxWidth: false }
+  });
+</script>
+
+</body>
+</html>

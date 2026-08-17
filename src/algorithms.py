@@ -24,6 +24,7 @@ class SelfTrainedGradientDescent:
                           preactivations_lab: torch.Tensor, 
                           Y_lab: torch.Tensor,
                           preactivations_unl: torch.Tensor, 
+                          Y_psd: torch.Tensor,
                           pi: float) -> torch.Tensor:
         """
         Computes the gradient of the empirical risk with respect to the preactivation vector r.
@@ -42,7 +43,6 @@ class SelfTrainedGradientDescent:
             self.cfg.negative_margin
         )
         n_psd = mask.sum()
-        Y_psd = torch.where(preactivations_unl >= 0, 1, -1)
         if n_psd > 1e-10:
             grad_unl = self.cfg.loss_function.gradient(preactivations_unl, Y_psd) * mask / n_psd
         else:
@@ -59,6 +59,7 @@ class SelfTrainedGradientDescent:
                           X_lab: torch.Tensor, 
                           Y_lab: torch.Tensor,
                           X_unl: torch.Tensor, 
+                          Y_psd: torch.Tensor,
                           pi: float) -> Tuple[float, torch.Tensor]:
         """
         Computes the full gradient step for model parameters (bias and weights).
@@ -75,7 +76,7 @@ class SelfTrainedGradientDescent:
         preactivations_lab = (X_lab @ weights) / torch.sqrt(d) + bias
         preactivations_unl = (X_unl @ weights) / torch.sqrt(d) + bias
 
-        emp_risk = self._compute_empirical_risk_gradient(preactivations_lab, Y_lab, preactivations_unl, pi) # pseudo-residual
+        emp_risk = self._compute_empirical_risk_gradient(preactivations_lab, Y_lab, preactivations_unl, Y_psd, pi) # pseudo-residual
 
         X_total = torch.concatenate([X_lab, X_unl])
 
@@ -85,16 +86,23 @@ class SelfTrainedGradientDescent:
         return torch.mean(emp_risk), (torch.sqrt(d) / n) * (X_total.T @ emp_risk) + self.cfg.penalty_param * decay
 
     def fit(self, X_lab: torch.Tensor, Y_lab: torch.Tensor, X_unl: torch.Tensor, 
-            initial_bias: Optional[float] = None, initial_weights: Optional[torch.Tensor] = None) -> None:
+            initial_bias: Optional[float] = None, 
+            initial_weights: Optional[torch.Tensor] = None,
+            initial_pseudo_labels: Optional[torch.Tensor] = None
+        ) -> None:
         """
         Fits the self-training model to the provided labeled and unlabeled data.
         """
 
-        d = X_lab.shape[1]
+        d = torch.tensor(X_lab.shape[1])
 
         assert (self.cfg.include_bias) or (initial_bias is None), "Cannot initialize inital bias when inlcude_bias is set to False"
         self.bias = initial_bias if initial_bias is not None else 0.0
         self.weights = initial_weights if initial_weights is not None else torch.normal(mean=0.0, std=1.0, size=(d,)) 
+
+        if initial_pseudo_labels is None:
+            preactivations_unl = (X_unl @ self.weights) / torch.sqrt(d) + self.bias
+            initial_pseudo_labels = torch.where(preactivations_unl >= 0, 1, -1)
 
         if self.callback is not None:
             self.callback(self, 0)
@@ -103,7 +111,9 @@ class SelfTrainedGradientDescent:
             psd_param = self.cfg.get_pseudo_label_weight(t) # \pi^t
         
             # Compute the gradient and update weights
-            b_grad, w_grad = self._compute_gradient_step(self.bias, self.weights, X_lab, Y_lab, X_unl, psd_param)
+            b_grad, w_grad = self._compute_gradient_step(
+                self.bias, self.weights, X_lab, Y_lab, X_unl, initial_pseudo_labels, psd_param
+            )
 
             # Catch gradient divergence explicitly
             #validate_gradient_step(t, self.weights, grad)

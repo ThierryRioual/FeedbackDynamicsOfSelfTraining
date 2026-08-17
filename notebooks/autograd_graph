@@ -1,0 +1,274 @@
+digraph {
+	graph [size="22.95,22.95"]
+	node [align=left fontname=monospace fontsize=10 height=0.2 ranksep=0.1 shape=box style=filled]
+	5275987296 [label="g^1
+ (50000)" fillcolor=darkolivegreen1]
+	5344215872 -> 5275984576 [dir=none]
+	5275984576 [label="self
+ (50000)" fillcolor=orange]
+	5344215872 [label="MulBackward0
+---------------------
+other:           None
+self : [saved tensor]"]
+	5344216160 -> 5344215872
+	5344216160 -> 5275984016 [dir=none]
+	5275984016 [label="self
+ (50000)" fillcolor=orange]
+	5344216160 [label="MulBackward0
+---------------------
+other:           None
+self : [saved tensor]"]
+	5344216736 -> 5344216160
+	5344216736 -> 5275984736 [dir=none]
+	5275984736 [label="result
+ (50000)" fillcolor=orange]
+	5344216736 [label="SigmoidBackward0
+----------------------
+result: [saved tensor]"]
+	5344216640 -> 5344216736
+	5344216640 [label=NegBackward0]
+	5344216544 -> 5344216640
+	5344216544 -> 5276067856 [dir=none]
+	5276067856 [label="self
+ (50000)" fillcolor=orange]
+	5344216544 [label="MulBackward0
+---------------------
+other:           None
+self : [saved tensor]"]
+	5344216448 -> 5344216544
+	5344216448 [label="AddBackward0
+------------
+alpha: 1"]
+	5344216352 -> 5344216448
+	5344216352 [label="AddBackward0
+------------
+alpha: 1"]
+	5344217312 -> 5344216352
+	5344217312 [label="AddBackward0
+------------
+alpha: 1"]
+	5344218944 -> 5344217312
+	5344218944 -> 5275985856 [dir=none]
+	5275985856 [label="other
+ (50000)" fillcolor=orange]
+	5344218944 [label="MulBackward0
+---------------------
+other: [saved tensor]
+self :           None"]
+	5344218224 -> 5344218944
+	5344218224 [label="AddBackward0
+------------
+alpha: 1"]
+	5344218320 -> 5344218224
+	5275979840 [label="b^0
+ ()" fillcolor=lightblue]
+	5275979840 -> 5344218320
+	5344218320 [label=AccumulateGrad]
+	5344217504 -> 5344216352
+	5344217504 -> 5275984336 [dir=none]
+	5275984336 [label="vec
+ (1)" fillcolor=orange]
+	5344217504 [label="MvBackward0
+--------------------
+self:           None
+vec : [saved tensor]"]
+	5344218272 -> 5344217504
+	5344218272 [label="StackBackward0
+--------------
+dim: 1"]
+	5344218656 -> 5344218272
+	5344218656 -> 5275985216 [dir=none]
+	5275985216 [label="self
+ (50000)" fillcolor=orange]
+	5344218656 [label="MulBackward0
+---------------------
+other:           None
+self : [saved tensor]"]
+	5344218752 -> 5344218656
+	5344218752 -> 5275985296 [dir=none]
+	5275985296 [label="self
+ (50000)" fillcolor=orange]
+	5344218752 [label="MulBackward0
+---------------------
+other:           None
+self : [saved tensor]"]
+	5344218848 -> 5344218752
+	5344218848 -> 5275986256 [dir=none]
+	5275986256 [label="result
+ (50000)" fillcolor=orange]
+	5344218848 [label="SigmoidBackward0
+----------------------
+result: [saved tensor]"]
+	5344218368 -> 5344218848
+	5344218368 [label=NegBackward0]
+	5344218608 -> 5344218368
+	5344218608 -> 5276067856 [dir=none]
+	5276067856 [label="self
+ (50000)" fillcolor=orange]
+	5344218608 [label="MulBackward0
+---------------------
+other:           None
+self : [saved tensor]"]
+	5344216256 -> 5344218608
+	5344216256 [label="AddBackward0
+------------
+alpha: 1"]
+	5344215536 -> 5344216256
+	5344215536 [label="AddBackward0
+------------
+alpha: 1"]
+	5344215248 -> 5344215536
+	5344215248 -> 5276152352 [dir=none]
+	5276152352 [label="other
+ (50000)" fillcolor=orange]
+	5344215248 [label="MulBackward0
+---------------------
+other: [saved tensor]
+self :           None"]
+	5344218320 -> 5344215248
+	5344216208 -> 5344216256
+	5276178048 [label="omega^0
+ (50000)" fillcolor=lightblue]
+	5276178048 -> 5344216208
+	5344216208 [label=AccumulateGrad]
+	5344216400 -> 5344216448
+	5275984256 [label="omega^1
+ (50000)" fillcolor=lightblue]
+	5275984256 -> 5344216400
+	5344216400 [label=AccumulateGrad]
+	5344215872 -> 5275987296
+	5276155552 [label="g^0
+ (50000)" fillcolor=darkolivegreen1]
+	5344218656 -> 5276155552
+	5275984096 [label="r^1
+ (50000)" fillcolor=darkolivegreen1]
+	5344216448 -> 5275984096
+	5276124880 [label="r^0
+ (50000)" fillcolor=darkolivegreen1]
+	5344216256 -> 5276124880
+	5275986016 [label="b^1
+ ()" fillcolor=darkolivegreen1]
+	5344218224 -> 5275986016
+	5275984416 [label="b^2
+ ()" fillcolor=darkolivegreen1]
+	5344216112 [label="AddBackward0
+------------
+alpha: 1"]
+	5344218224 -> 5344216112
+	5344216112 -> 5275984416
+	5276177568 [label="w^0
+ (50000)" fillcolor=darkolivegreen1]
+	5275983936 [label="w^1
+ (50000)" fillcolor=darkolivegreen1]
+	5344216592 [label="AddBackward0
+------------
+alpha: 1"]
+	5344216496 -> 5344216592
+	5344216496 [label="AddBackward0
+------------
+alpha: 1"]
+	5344217984 -> 5344216496
+	5344217984 [label="AddBackward0
+------------
+alpha: 1"]
+	5344219088 -> 5344217984
+	5276177568 [label="w^0
+ (50000)" fillcolor=lightblue]
+	5276177568 -> 5344219088
+	5344219088 [label=AccumulateGrad]
+	5344215824 -> 5344217984
+	5344215824 -> 5296322496 [dir=none]
+	5296322496 [label="other
+ ()" fillcolor=orange]
+	5344215824 [label="MulBackward0
+---------------------
+other: [saved tensor]
+self :           None"]
+	5344219088 -> 5344215824
+	5344216784 -> 5344216592
+	5344216784 -> 5296322816 [dir=none]
+	5296322816 [label="other
+ ()" fillcolor=orange]
+	5344216784 [label="DivBackward0
+---------------------
+other: [saved tensor]
+self :           None"]
+	5344218800 -> 5344216784
+	5344218800 [label="AddBackward0
+------------
+alpha: 1"]
+	5344218560 -> 5344218800
+	5344218560 -> 5275985376 [dir=none]
+	5275985376 [label="vec
+ (1)" fillcolor=orange]
+	5344218560 [label="MvBackward0
+--------------------
+self:           None
+vec : [saved tensor]"]
+	5344215200 -> 5344218560
+	5344215200 [label="StackBackward0
+--------------
+dim: 1"]
+	5344219088 -> 5344215200
+	5344218896 -> 5344218800
+	5291340480 [label="xi^0
+ (50000)" fillcolor=lightblue]
+	5291340480 -> 5344218896
+	5344218896 [label=AccumulateGrad]
+	5344216592 -> 5275983936
+	5275986416 [label="w^2
+ (50000)" fillcolor=darkolivegreen1]
+	5344216688 [label="AddBackward0
+------------
+alpha: 1"]
+	5344215152 -> 5344216688
+	5344215152 [label="AddBackward0
+------------
+alpha: 1"]
+	5344216304 -> 5344215152
+	5344216304 [label="AddBackward0
+------------
+alpha: 1"]
+	5344216592 -> 5344216304
+	5344216016 -> 5344216304
+	5344216016 -> 5296323776 [dir=none]
+	5296323776 [label="other
+ ()" fillcolor=orange]
+	5344216016 [label="MulBackward0
+---------------------
+other: [saved tensor]
+self :           None"]
+	5344216592 -> 5344216016
+	5344218704 -> 5344216688
+	5344218704 -> 5296324096 [dir=none]
+	5296324096 [label="other
+ ()" fillcolor=orange]
+	5344218704 [label="DivBackward0
+---------------------
+other: [saved tensor]
+self :           None"]
+	5344217264 -> 5344218704
+	5344217264 [label="AddBackward0
+------------
+alpha: 1"]
+	5344215440 -> 5344217264
+	5344215440 -> 5275985456 [dir=none]
+	5275985456 [label="vec
+ (2)" fillcolor=orange]
+	5344215440 [label="MvBackward0
+--------------------
+self:           None
+vec : [saved tensor]"]
+	5344218176 -> 5344215440
+	5344218176 [label="StackBackward0
+--------------
+dim: 1"]
+	5344219088 -> 5344218176
+	5344216592 -> 5344218176
+	5344217360 -> 5344217264
+	5275986176 [label="xi^1
+ (50000)" fillcolor=lightblue]
+	5275986176 -> 5344217360
+	5344217360 [label=AccumulateGrad]
+	5344216688 -> 5275986416
+}
