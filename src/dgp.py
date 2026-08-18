@@ -1,132 +1,142 @@
-import torch
+"""Conditional Gaussian design generation for realised quenched environments."""
+
+from __future__ import annotations
+
 from dataclasses import dataclass, field
-from typing import Tuple, Optional
+from typing import Optional, Tuple
+
+import torch
 
 from src.config import DataConfig
+from src.environment import FourCellSampleTypeLaw, QuenchedEnvironment, SampleTypeLaw
 
 
 @dataclass
 class IsotropicGaussian:
-    """
-    Generates synthetic datasets where features are drawn from an isotropic Gaussian distribution.
-    Labels are drawn according to the population-level parameters in DataConfig.
+    """Generate ``X_i=Y_i mu/sqrt(d)+sigma U_i`` conditional on an environment.
 
-    Finite-dimensional quantities (n_train, n_test, dimensions) live here — not on DataConfig —
-    because they describe a specific experiment, not the Laws of the Universe.
+    ``DataConfig`` retains the legacy product-law convenience path.  Passing an
+    explicit ``sample_type_law`` or ``environment`` exposes the general
+    quenched model without changing the Gaussian conditional design.
     """
+
     cfg: DataConfig
-    n_train: int           # total number of training samples (N + M)
-    n_test: int            # number of test samples
-    dimensions: int        # feature dimension d
+    n_train: int
+    n_test: int
+    dimensions: int
     seed: int = 42
-    signal_vector: Optional[torch.Tensor] = None  # optionally override signal_law
+    signal_vector: Optional[torch.Tensor] = None
+    sample_type_law: Optional[SampleTypeLaw] = None
+    environment: Optional[QuenchedEnvironment] = None
+    test_label_prior: Optional[float] = None
 
     rng: torch.Generator = field(init=False)
     _mu: torch.Tensor = field(init=False)
+    last_environment_: Optional[QuenchedEnvironment] = field(init=False, default=None)
 
-    def __post_init__(self):
-        """Sets up the RNG and resolves the ground-truth signal vector."""
+    def __post_init__(self) -> None:
+        if self.n_train <= 0 or self.n_test < 0 or self.dimensions <= 0:
+            raise ValueError("n_train and dimensions must be positive; n_test nonnegative")
         self.rng = torch.Generator().manual_seed(self.seed)
-
-        # Resolve signal vector: explicit override > sample from prior
         if self.signal_vector is not None:
-            self._mu = self.signal_vector
+            mu = torch.as_tensor(self.signal_vector, dtype=torch.float64).detach().clone()
+        elif self.environment is not None:
+            mu = self.environment.mu.detach().clone()
         else:
-            self._mu = torch.tensor(
-                [self.cfg.signal_law() for _ in range(self.dimensions)],
-                dtype=torch.float64
-            )
+            # Legacy callable laws have no generator argument.  Sampling remains
+            # isolated at the object boundary through an explicit DGP seed for
+            # all Gaussian/noise draws; callers wanting complete stream control
+            # can supply signal_vector or an explicit environment.
+            mu = torch.tensor([self.cfg.signal_law() for _ in range(self.dimensions)], dtype=torch.float64)
+        if mu.shape != (self.dimensions,):
+            raise ValueError(f"signal vector must have shape ({self.dimensions},)")
+        self._mu = mu
+        if self.environment is not None and self.environment.d != self.dimensions:
+            raise ValueError("environment and dimensions disagree")
+        if self.test_label_prior is not None and not 0 < self.test_label_prior < 1:
+            raise ValueError("test_label_prior must lie in (0,1)")
 
-    # --- Convenience properties (expected stratified counts for display) ---
+    @property
+    def law(self) -> SampleTypeLaw:
+        return self.sample_type_law or FourCellSampleTypeLaw.product(
+            label_prior=self.cfg.label_prior,
+            supervision_ratio=self.cfg.supervision_ratio,
+        )
 
     @property
     def n_labeled(self) -> int:
-        """Expected number of labeled samples: round(ρ * n_train)."""
+        if self.last_environment_ is not None:
+            return self.last_environment_.N
         return round(self.cfg.supervision_ratio * self.n_train)
 
     @property
     def n_unlabeled(self) -> int:
-        """Expected number of unlabeled samples: n_train - n_labeled."""
+        if self.last_environment_ is not None:
+            return self.last_environment_.M
         return self.n_train - self.n_labeled
 
     @property
     def empirical_data_to_dimension_ratio(self) -> float:
-        """The realized δ̂ = n_train / d for this experiment."""
         return self.n_train / self.dimensions
 
-    def _sample_class(self, n_samples: int, sign: int) -> torch.Tensor:
-        """Samples from the isotropic Gaussian distribution for a given class label."""
-        d = self._mu.shape[0]
-        noise = torch.randn((n_samples, d), generator=self.rng, dtype=torch.float64)
-        return (sign * self._mu) / (d ** 0.5) + self.cfg.scale * noise
+    def sample_environment(self, *, stratified: bool = False) -> QuenchedEnvironment:
+        if self.environment is not None:
+            self.last_environment_ = self.environment
+            return self.environment
+        if stratified:
+            # Stratification is defined only for the legacy product law; it is a
+            # variance-reduction extension rather than an iid sample from a
+            # general four-cell law.
+            if self.sample_type_law is not None:
+                raise ValueError("stratified sampling is unavailable for a general joint sample-type law")
+            p, rho, n = self.cfg.label_prior, self.cfg.supervision_ratio, self.n_train
+            N = round(rho * n)
+            categories = torch.cat((
+                torch.zeros(round(p * N), dtype=torch.long),
+                torch.full((N - round(p * N),), 2, dtype=torch.long),
+                torch.ones(round(p * (n - N)), dtype=torch.long),
+                torch.full((n - N - round(p * (n - N)),), 3, dtype=torch.long),
+            ))
+            categories = categories[torch.randperm(n, generator=self.rng)]
+            Y = torch.where(categories < 2, 1.0, -1.0)
+            Delta = torch.where((categories == 0) | (categories == 2), 1.0, 0.0)
+        else:
+            Y, Delta = self.law.sample(n=self.n_train, generator=self.rng, dtype=torch.float64, device=torch.device("cpu"))
+        env = QuenchedEnvironment(self._mu, Y, Delta)
+        self.last_environment_ = env
+        return env
+
+    def sample_design(self, environment: QuenchedEnvironment, *, generator: Optional[torch.Generator] = None, noise: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Return ``(X,U)`` for fixed ``environment``; ``Delta`` is unused."""
+
+        if environment.d != self.dimensions:
+            raise ValueError("environment dimension disagrees with generator")
+        generator = self.rng if generator is None else generator
+        if noise is None:
+            U = torch.randn((environment.n, environment.d), generator=generator, dtype=torch.float64, device=environment.mu.device)
+        else:
+            U = torch.as_tensor(noise, dtype=torch.float64, device=environment.mu.device).detach().clone()
+            if U.shape != (environment.n, environment.d):
+                raise ValueError("noise must have shape (n,d)")
+        X = environment.Y[:, None] * environment.mu[None, :] / (environment.d ** 0.5) + self.cfg.scale * U
+        return X, U
+
+    def sample_test(self, *, generator: Optional[torch.Generator] = None) -> Tuple[torch.Tensor, torch.Tensor]:
+        generator = self.rng if generator is None else generator
+        p = self.test_label_prior if self.test_label_prior is not None else self.law.label_prior
+        Y = torch.where(torch.rand(self.n_test, generator=generator) < p, 1.0, -1.0).to(torch.float64)
+        U = torch.randn((self.n_test, self.dimensions), generator=generator, dtype=torch.float64)
+        X = Y[:, None] * self._mu[None, :] / (self.dimensions ** 0.5) + self.cfg.scale * U
+        return X, Y
+
+    def sample_full(self, stratified: bool = False) -> Tuple[QuenchedEnvironment, torch.Tensor, torch.Tensor, torch.Tensor]:
+        env = self.sample_environment(stratified=stratified)
+        X, _ = self.sample_design(env)
+        X_test, Y_test = self.sample_test()
+        return env, X, X_test, Y_test
 
     def sample(self, stratified: bool = False) -> Tuple[torch.Tensor, ...]:
-        """
-        Samples labeled, unlabeled, and test datasets.
+        """Backward-compatible split view derived from one full realisation."""
 
-        Args:
-            stratified: If True, forces exact counts based on population probabilities
-                        (zero binomial variance, ideal for smooth SE comparison plots).
-                        If False, uses pure i.i.d. random sampling (mathematically pure).
-        """
-        rho = self.cfg.supervision_ratio
-        p = self.cfg.label_prior
-
-        if stratified:
-            # Exact counts — zero variance
-            N = round(rho * self.n_train)
-            M = self.n_train - N
-
-            n_pos_lab = round(p * N)
-            n_neg_lab = N - n_pos_lab
-
-            m_pos_unl = round(p * M)
-            m_neg_unl = M - m_pos_unl
-
-            n_pos_test = round(p * self.n_test)
-            n_neg_test = self.n_test - n_pos_test
-        else:
-            # I.I.D. random sampling — mathematically pure
-            N = int((torch.rand(self.n_train, generator=self.rng) < rho).sum().item())
-            M = self.n_train - N
-
-            n_pos_lab = int((torch.rand(N, generator=self.rng) < p).sum().item())
-            n_neg_lab = N - n_pos_lab
-
-            m_pos_unl = int((torch.rand(M, generator=self.rng) < p).sum().item())
-            m_neg_unl = M - m_pos_unl
-
-            n_pos_test = int((torch.rand(self.n_test, generator=self.rng) < p).sum().item())
-            n_neg_test = self.n_test - n_pos_test
-
-        # Labeled Set
-        X_pos_lab = self._sample_class(n_pos_lab, sign=1)
-        X_neg_lab = self._sample_class(n_neg_lab, sign=-1)
-        X_lab = torch.vstack([X_pos_lab, X_neg_lab])
-        Y_lab = torch.cat([torch.ones(n_pos_lab, dtype=torch.float64), -torch.ones(n_neg_lab, dtype=torch.float64)])
-
-        # Unlabeled Set
-        X_pos_unl = self._sample_class(m_pos_unl, sign=1)
-        X_neg_unl = self._sample_class(m_neg_unl, sign=-1)
-        X_unl = torch.vstack([X_pos_unl, X_neg_unl])
-        Y_unl = torch.cat([torch.ones(m_pos_unl, dtype=torch.float64), -torch.ones(m_neg_unl, dtype=torch.float64)])
-
-        # Test Set
-        X_pos_test = self._sample_class(n_pos_test, sign=1)
-        X_neg_test = self._sample_class(n_neg_test, sign=-1)
-        X_test = torch.vstack([X_pos_test, X_neg_test])
-        Y_test = torch.cat([torch.ones(n_pos_test, dtype=torch.float64), -torch.ones(n_neg_test, dtype=torch.float64)])
-
-        # Shuffle indices
-        shuffled_idx_lab = torch.randperm(N, generator=self.rng)
-        shuffled_idx_unl = torch.randperm(M, generator=self.rng)
-        shuffled_idx_test = torch.randperm(self.n_test, generator=self.rng)
-
-        return (
-            X_lab[shuffled_idx_lab],
-            Y_lab[shuffled_idx_lab],
-            X_unl[shuffled_idx_unl],
-            Y_unl[shuffled_idx_unl],
-            X_test[shuffled_idx_test],
-            Y_test[shuffled_idx_test]
-        )
+        env, X, X_test, Y_test = self.sample_full(stratified=stratified)
+        return X[env.I_L], env.Y[env.I_L], X[env.I_U], env.Y[env.I_U], X_test, Y_test

@@ -37,6 +37,17 @@ SampleBaseSampler = Callable[
 ]
 
 
+@dataclass(frozen=True)
+class TheoremTrajectoryView:
+    """The theorem-facing trajectory, excluding auxiliary terminal ``g^T,p^T``."""
+
+    W: Tuple[torch.Tensor, ...]
+    Q: Tuple[torch.Tensor, ...]
+    R: Tuple[torch.Tensor, ...]
+    G: Tuple[torch.Tensor, ...]
+    P: Tuple[torch.Tensor, ...]
+
+
 @dataclass
 class MacroscopicStateEvolution:
     """Numerically integrate the effective dynamics by particle averaging.
@@ -612,9 +623,27 @@ class MacroscopicStateEvolution:
             self.K_w,
         )
 
+    @property
+    def theorem_trajectory(self) -> TheoremTrajectoryView:
+        """Expose ``(W_T,Q_T,R_T,G_{T-1},P_{T-1})`` without deleting diagnostics."""
+
+        if any(value is None for value in self.weight[: self.T + 1]) or any(value is None for value in self.forward_noise[: self.T + 1]) or any(value is None for value in self.preactivation[: self.T + 1]):
+            raise RuntimeError("compute_trajectory must be called before requesting theorem_trajectory")
+        if any(value is None for value in self.residual[: self.T]) or any(value is None for value in self.backward_noise[: self.T]):
+            raise RuntimeError("theorem residual histories are incomplete")
+        return TheoremTrajectoryView(
+            W=tuple(self.weight[: self.T + 1]),
+            Q=tuple(self.forward_noise[: self.T + 1]),
+            R=tuple(self.preactivation[: self.T + 1]),
+            G=tuple(self.residual[: self.T]),
+            P=tuple(self.backward_noise[: self.T]),
+        )
+
     def _pseudo_weight(self, t: int) -> float:
         # The repository's schedules are retained as a documented experimental
         # extension.  The terminal diagnostic uses the final update's value.
+        if self.T == 0:
+            return 0.0
         return self.algo_cfg.get_pseudo_label_weight(min(t, self.T - 1))
 
     def _check_time_access(self, t: int) -> None:

@@ -11,7 +11,7 @@ import torch
 
 from src.algorithms import SelfTrainedGradientDescent
 from src.asymptotics import MacroscopicStateEvolution
-from src.config import AlgorithmConfig, DataConfig
+from src.config import AlgorithmConfig, DataConfig, LinearRampSchedule
 from src.dgp import IsotropicGaussian
 
 
@@ -22,8 +22,7 @@ def _algorithm_config(pseudo_label_param):
         step_size=0.1,
         penalty_param=0.1,
         pseudo_label_param=pseudo_label_param,
-        ramp_start=0,
-        ramp_end=0,
+        experimental_schedule=LinearRampSchedule(1, 1),
         include_bias=True,
     )
 

@@ -6,8 +6,8 @@ import warnings
 from typing import Optional, TYPE_CHECKING
 
 import torch
-from scipy.stats import norm
-from torchviz import make_dot
+from src.performance import population_error
+from src.primitives import pseudo_labels, pseudo_residual
 
 if TYPE_CHECKING:
     from src.asymptotics import MacroscopicStateEvolution
@@ -92,23 +92,35 @@ def compute_abstract_pseudo_residual_from(
         if time_index < 0:
             raise ValueError("time_index must be nonnegative")
 
-    labeled_grad = loss_function.gradient(preactivation, label)
-    labeled_contribution = (indicator / rho) * labeled_grad
-
-    if coef == 0.0 or rho >= 1.0:
-        return -eta * labeled_contribution
-
     if isinstance(selection_rate, torch.Tensor):
-        rate_value = selection_rate.detach().item()
+        rate = selection_rate.detach().to(dtype=preactivation.dtype, device=preactivation.device)
+        rate_value = rate.item()
     else:
         rate_value = float(selection_rate)
+        rate = preactivation.new_tensor(rate_value)
 
     if not math.isfinite(rate_value):
         raise FloatingPointError(f"selection_rate must be finite, got {rate_value}")
     if rate_value <= 0.0:
         # The objective adopts the convention 0/0 = 0 when no unlabeled
         # observation is selected, so its pseudo-labeled contribution is zero.
-        return -eta * labeled_contribution
+        rate = preactivation.new_zeros(())
+
+    if coef == 0.0 or rho >= 1.0 or rate_value <= 0.0:
+        # No pseudo-labelled term is active, hence no exogenous label is
+        # mathematically needed at t=0.
+        return pseudo_residual(
+            scores=preactivation,
+            Y=label,
+            Delta=indicator.to(dtype=preactivation.dtype),
+            Yhat=label,
+            selection=torch.zeros_like(selection_mask),
+            omega=rate,
+            pi=0.0,
+            eta=eta,
+            rho=rho,
+            loss_function=loss_function,
+        )
 
     if time_index == 0:
         if initial_pseudo_label is None:
@@ -134,43 +146,32 @@ def compute_abstract_pseudo_residual_from(
             raise ValueError(
                 "initial_pseudo_label entries must belong to {-1, +1}"
             )
-        y_pseudo = initial_pseudo_label.to(dtype=preactivation.dtype)
+        y_init = initial_pseudo_label.to(dtype=preactivation.dtype)
     else:
-        y_pseudo = torch.where(preactivation >= 0, 1.0, -1.0)
-
-    unlabeled_grad = loss_function.gradient(preactivation, y_pseudo)
-
-    unlabeled_contribution = (
-        coef
-        * ((1.0 - indicator) / (1.0 - rho))
-        * unlabeled_grad
-        * (selection_mask / selection_rate)
+        y_init = torch.where(preactivation >= 0, 1.0, -1.0)
+    # ``time_index=None`` historically meant endogenous sign scores; map it to
+    # a positive time to preserve that compatibility while sharing the single
+    # manuscript pseudo-residual implementation.
+    effective_time = 1 if time_index is None else time_index
+    y_pseudo = pseudo_labels(effective_time, preactivation, y_init)
+    return pseudo_residual(
+        scores=preactivation,
+        Y=label,
+        Delta=indicator.to(dtype=preactivation.dtype),
+        Yhat=y_pseudo,
+        selection=selection_mask,
+        omega=rate,
+        pi=coef,
+        eta=eta,
+        rho=rho,
+        loss_function=loss_function,
     )
-    return -eta * (labeled_contribution + unlabeled_contribution)
 
 def compute_population_error_from(b: float, m: float, tau: float, sigma: float, p: float) -> float:
     """
     Computes the population error.
     """
-    b = float(b)
-    m = float(m)
-    tau = float(tau)
-    sigma = float(sigma)
-    p = float(p)
-    noise_scale = tau * sigma
-
-    if noise_scale == 0.0:
-        # The score is deterministic conditional on the class.  The classifier
-        # uses torch.where(score >= 0, +1, -1), so a zero score is classified as
-        # positive.  Hence equality is an error only for the negative class.
-        positive_class_error = float(b + m < 0.0)
-        negative_class_error = float(b - m >= 0.0)
-        return p * positive_class_error + (1.0 - p) * negative_class_error
-
-    err = p * norm.cdf((-b - m) / noise_scale) + (1.0 - p) * norm.cdf(
-        (b - m) / noise_scale
-    )
-    return float(err)
+    return population_error(b=b, m=m, tau=tau, sigma=sigma, p=p)
 
 def plot_autograd_dag(
     se: MacroscopicStateEvolution, 
@@ -185,6 +186,10 @@ def plot_autograd_dag(
     helper on production output therefore emits a warning and can only render
     disconnected tensor leaves; use the orthogonal-basis diagnostics instead.
     """
+    # Imported only for this diagnostic; production paths are graph-free and
+    # should not require the optional torchviz dependency.
+    from torchviz import make_dot
+
     # 1. Base static leaf nodes
     params = {
         "Y": se.label,
