@@ -57,6 +57,7 @@ class MonteCarloExperiment:
 
     def _initialization(self, env, X, rng: torch.Generator) -> SelfTrainingInitialization:
         w0 = torch.randn(env.d, generator=rng, dtype=torch.float64, device=env.mu.device)
+        initial_bias = self.base_config.initial_bias
         y_init = env.Y.clone()
         if env.M:
             if self.initialization_mode == "exogenous_rademacher":
@@ -66,10 +67,12 @@ class MonteCarloExperiment:
                     -1.0,
                 )
             elif self.initialization_mode == "endogenous_scores":
-                y_init[env.I_U] = compute_pseudo_labels_from_scores(compute_scores(X, 0.0, w0))[env.I_U]
+                y_init[env.I_U] = compute_pseudo_labels_from_scores(
+                    compute_scores(X, initial_bias, w0)
+                )[env.I_U]
             else:
                 raise ValueError(f"unknown initialization_mode {self.initialization_mode}")
-        return SelfTrainingInitialization(0.0, w0, y_init).for_environment(env)
+        return SelfTrainingInitialization(initial_bias, w0, y_init).for_environment(env)
 
     @staticmethod
     def _streams(seed: int) -> tuple[torch.Generator, torch.Generator, torch.Generator, torch.Generator]:

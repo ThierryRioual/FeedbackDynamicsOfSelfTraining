@@ -9,7 +9,7 @@ by :class:`src.asymptotics.MacroscopicStateEvolution`.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Iterable, Mapping, Optional, Sequence
 from unittest.mock import patch
 
@@ -18,6 +18,7 @@ import numpy as np
 import torch
 
 from src.algorithms import SelfTrainedGradientDescent
+import src.asymptotics as asymptotics_module
 from src.asymptotics import MacroscopicStateEvolution
 from src.callbacks import TestEvaluatorCallback
 from src.config import AlgorithmConfig, DataConfig
@@ -30,6 +31,7 @@ from src.environment import (
 )
 from src.initialization import SelfTrainingInitialization, sign_with_positive_tie
 from src.performance import bayes_parameters, population_error
+from src.primitives import pseudo_residual
 
 
 DEFAULT_METRICS = {
@@ -43,26 +45,283 @@ DEFAULT_METRICS = {
 
 @dataclass
 class ExperimentRun:
-    """One finite/SE comparison and its immutable configuration."""
+    """One finite/SE comparison, including best population-error summaries."""
 
     name: str
     data_cfg: DataConfig
     algo_cfg: AlgorithmConfig
-    environment: QuenchedEnvironment
-    X: torch.Tensor
-    X_test: torch.Tensor
-    Y_test: torch.Tensor
-    finite: SelfTrainedGradientDescent
-    callback: TestEvaluatorCallback
+    environment: Optional[QuenchedEnvironment]
+    X: Optional[torch.Tensor]
+    X_test: Optional[torch.Tensor]
+    Y_test: Optional[torch.Tensor]
+    finite: Optional[SelfTrainedGradientDescent]
+    callback: Optional[TestEvaluatorCallback]
     se: Optional[MacroscopicStateEvolution]
     signal_scale: float
+    finite_minimum_error: Optional[float]
+    finite_minimum_error_iteration: Optional[int]
+    state_evolution_minimum_error: Optional[float]
+    state_evolution_minimum_error_iteration: Optional[int]
     metadata: dict[str, Any]
+    error_diagnostics: dict[str, dict[str, np.ndarray]] = field(
+        init=False, default_factory=dict
+    )
 
 
 def as_numpy(values: Iterable[Any]) -> np.ndarray:
     """Convert scalar tensor histories to a float NumPy array."""
 
     return np.asarray([float(torch.as_tensor(value)) for value in values], dtype=float)
+
+
+def compute_error_diagnostics(
+    trajectory: Mapping[str, Iterable[Any]],
+    *,
+    p: float,
+    sigma: float,
+    s_mu: float,
+    zero_tolerance: Optional[float] = None,
+) -> dict[str, np.ndarray]:
+    """Decompose completed-trajectory error using recorded observables only.
+
+    Raw ``m``, ``bias``, and ``tau`` histories take precedence.  A trajectory
+    without raw coordinates may instead provide ``normalized_alignment`` and
+    ``normalized_bias``.
+    """
+
+    p = float(p)
+    sigma = float(sigma)
+    s_mu = float(s_mu)
+    if not 0.0 < p < 1.0:
+        raise ValueError("p must lie strictly between zero and one")
+    if not np.isfinite(sigma) or sigma <= 0.0:
+        raise ValueError("sigma must be finite and positive")
+    if not np.isfinite(s_mu) or s_mu < 0.0:
+        raise ValueError("s_mu must be finite and nonnegative")
+
+    def values(key: str) -> np.ndarray:
+        result = np.asarray(trajectory[key], dtype=float)
+        if result.ndim != 1:
+            raise ValueError(f"trajectory['{key}'] must be one-dimensional")
+        return result
+
+    has_raw_coordinates = all(key in trajectory for key in ("m", "bias", "tau"))
+    if has_raw_coordinates:
+        alignment = values("m")
+        bias = values("bias")
+        weight_norm = values("tau")
+        if not (alignment.size == bias.size == weight_norm.size):
+            raise ValueError("m, bias, and tau must have equal lengths")
+        with np.errstate(divide="ignore", invalid="ignore"):
+            normalized_alignment = np.divide(
+                alignment,
+                weight_norm,
+                out=np.full_like(alignment, np.nan),
+                where=weight_norm > 0.0,
+            )
+            normalized_bias = np.divide(
+                bias,
+                weight_norm,
+                out=np.full_like(bias, np.nan),
+                where=weight_norm > 0.0,
+            )
+    elif all(
+        key in trajectory for key in ("normalized_alignment", "normalized_bias")
+    ):
+        normalized_alignment = values("normalized_alignment")
+        normalized_bias = values("normalized_bias")
+        if normalized_alignment.size != normalized_bias.size:
+            raise ValueError(
+                "normalized_alignment and normalized_bias must have equal lengths"
+            )
+    else:
+        raise KeyError(
+            "trajectory must contain either m, bias, tau or both normalized coordinates"
+        )
+
+    length = normalized_alignment.size
+    if length == 0:
+        raise ValueError("trajectory histories must be non-empty")
+
+    def normalized_population_error(
+        normalized_bias_values: np.ndarray,
+        normalized_alignment_values: np.ndarray,
+    ) -> np.ndarray:
+        return np.asarray(
+            [
+                population_error(beta, align, 1.0, sigma, p)
+                for beta, align in zip(
+                    normalized_bias_values, normalized_alignment_values
+                )
+            ],
+            dtype=float,
+        )
+
+    population_error_from_coordinates = normalized_population_error(
+        normalized_bias, normalized_alignment
+    )
+    if zero_tolerance is None:
+        zero_tolerance = float(np.sqrt(np.finfo(float).eps))
+    else:
+        zero_tolerance = float(zero_tolerance)
+        if not np.isfinite(zero_tolerance) or zero_tolerance < 0.0:
+            raise ValueError("zero_tolerance must be finite and nonnegative")
+
+    def conditionally_optimal_bias(
+        normalized_alignment_values: np.ndarray,
+    ) -> np.ndarray:
+        result = np.full(normalized_alignment_values.shape, np.nan, dtype=float)
+        if p == 0.5:
+            result[np.isfinite(normalized_alignment_values)] = 0.0
+            return result
+        valid = (
+            np.isfinite(normalized_alignment_values)
+            & (normalized_alignment_values > zero_tolerance)
+        )
+        result[valid] = (
+            sigma**2
+            / (2.0 * normalized_alignment_values[valid])
+            * np.log(p / (1.0 - p))
+        )
+        return result
+
+    optimal_normalized_bias = conditionally_optimal_bias(normalized_alignment)
+    conditionally_optimal_error = normalized_population_error(
+        optimal_normalized_bias, normalized_alignment
+    )
+    optimal_linear_bias = conditionally_optimal_bias(np.asarray([s_mu]))
+    optimal_linear_error_value = normalized_population_error(
+        optimal_linear_bias, np.asarray([s_mu])
+    )[0]
+    optimal_linear_error = np.full(length, optimal_linear_error_value, dtype=float)
+    alignment_regret = conditionally_optimal_error - optimal_linear_error
+    bias_regret = population_error_from_coordinates - conditionally_optimal_error
+    error_reconstructed = optimal_linear_error + alignment_regret + bias_regret
+
+    recorded_error = None
+    for error_key in ("error", "population_error"):
+        if error_key in trajectory:
+            recorded_error = values(error_key)
+            if recorded_error.size != length:
+                raise ValueError(
+                    f"trajectory['{error_key}'] must match the state-history length"
+                )
+            break
+    error_increment = np.diff(
+        error_reconstructed if recorded_error is None else recorded_error
+    )
+    alignment_regret_increment = np.diff(alignment_regret)
+    bias_regret_increment = np.diff(bias_regret)
+
+    return {
+        "normalized_alignment": normalized_alignment,
+        "normalized_bias": normalized_bias,
+        "optimal_normalized_bias": optimal_normalized_bias,
+        "optimal_linear_error": optimal_linear_error,
+        "alignment_regret": alignment_regret,
+        "bias_regret": bias_regret,
+        "error_reconstructed": error_reconstructed,
+        "error_increment": error_increment,
+        "alignment_regret_increment": alignment_regret_increment,
+        "bias_regret_increment": bias_regret_increment,
+    }
+
+
+def plot_error_diagnostics(
+    diagnostics: Mapping[str, Iterable[Any]],
+    *,
+    title: Optional[str] = None,
+    show: bool = True,
+):
+    """Plot the population-error regret decomposition."""
+
+    def as_1d(key: str) -> np.ndarray:
+        values = np.asarray(diagnostics[key], dtype=float)
+        if values.ndim != 1:
+            raise ValueError(f"diagnostics['{key}'] must be one-dimensional")
+        return values
+
+    optimal_error = as_1d("optimal_linear_error")
+    alignment_regret = as_1d("alignment_regret")
+    bias_regret = as_1d("bias_regret")
+    reconstructed_error = as_1d("error_reconstructed")
+
+    n_steps = reconstructed_error.size
+    for name, values in {
+        "optimal_linear_error": optimal_error,
+        "alignment_regret": alignment_regret,
+        "bias_regret": bias_regret,
+    }.items():
+        if values.size != n_steps:
+            raise ValueError(
+                f"diagnostics['{name}'] must have length {n_steps}, "
+                f"got {values.size}"
+            )
+
+    fig, axes = plt.subplots(
+        1, 3, figsize=(14.0, 4.0), constrained_layout=True, squeeze=False
+    )
+
+    # Panel 1: exact additive decomposition of the population error.
+    ax = axes.flat[0]
+    time = np.arange(n_steps)
+    ax.stackplot(
+        time,
+        optimal_error,
+        alignment_regret,
+        bias_regret,
+        labels=(
+            "optimal linear error",
+            "alignment regret",
+            "bias regret",
+        ),
+        colors=("#9ecae1", "#74c476", "#fd8d3c"),
+        alpha=0.75,
+    )
+    ax.plot(
+        time,
+        reconstructed_error,
+        color="black",
+        linewidth=1.0,
+        label="total population error",
+        zorder=3,
+    )
+    ax.set(
+        title="Population-error decomposition",
+        xlabel="iteration",
+        ylabel="classification error",
+    )
+    ax.grid(True, which="major", linestyle="-", linewidth=0.8, alpha=0.35)
+    ax.legend(loc="best")
+
+    # Panel 2: regret levels.
+    ax = axes.flat[1]
+    for key in ("alignment_regret", "bias_regret"):
+        values = as_1d(key)
+        ax.plot(np.arange(values.size), values, label=key)
+    ax.set(title="Regret levels", xlabel="iteration")
+    ax.grid(True, which="major", linestyle="-", linewidth=0.8, alpha=0.8)
+    ax.grid(True, which="minor", linestyle=":", linewidth=0.5, alpha=0.6)
+    ax.legend()
+
+    # Panel 3: one-step changes in the two regrets.
+    ax = axes.flat[2]
+    for key in ("alignment_regret_increment", "bias_regret_increment"):
+        values = as_1d(key)
+        ax.plot(np.arange(values.size), values, label=key)
+    ax.axhline(0.0, color="black", linewidth=0.8, alpha=0.7)
+    ax.set(title="One-step regret changes", xlabel="iteration")
+    ax.grid(True, which="major", linestyle="-", linewidth=0.8, alpha=0.8)
+    ax.grid(True, which="minor", linestyle=":", linewidth=0.5, alpha=0.6)
+    #ax.set_yscale('log')
+    ax.legend()
+
+    if title:
+        fig.suptitle(title, fontsize=15)
+    if show:
+        plt.show()
+
+    return fig, axes
 
 
 def rademacher(
@@ -78,6 +337,18 @@ def rademacher(
         -torch.ones(size, dtype=dtype, device=device),
     )
 
+def get_s_mu(
+    signal_mean: float,
+    signal_std: float
+) -> float:
+    return (signal_std**2 + signal_mean**2)**0.5
+
+def mahalanobis_separation(
+        s_mu: float,
+        sigma: float,
+) -> float:
+    return 2 * s_mu / sigma
+
 
 def exogenous_initial_labels(
     environment: QuenchedEnvironment, generator: torch.Generator
@@ -89,7 +360,7 @@ def exogenous_initial_labels(
     return y_init
 
 
-def make_parameter_base_sampler(signal_std: float, initialization_correlation: float = 0.0):
+def make_parameter_base_sampler(signal_std: float, initialization_correlation: float = 0.0, signal_mean: float = 0.0):
     """Return the joint ``(mu_tilde,w_init_tilde)`` particle law.
 
     ``initialization_correlation`` is the coefficient in
@@ -101,7 +372,7 @@ def make_parameter_base_sampler(signal_std: float, initialization_correlation: f
         raise ValueError("initialization_correlation must lie in [-1, 1]")
 
     def sampler(K: int, generator: torch.Generator, dtype: torch.dtype, device: torch.device):
-        mu = signal_std * torch.randn(K, generator=generator, dtype=dtype, device=device)
+        mu = signal_std * torch.randn(K, generator=generator, dtype=dtype, device=device) + signal_mean
         innovation = torch.randn(K, generator=generator, dtype=dtype, device=device)
         if signal_std == 0:
             w_init = innovation
@@ -121,11 +392,20 @@ def make_algorithm_config(
     eta: float,
     penalty: float,
     pi: float,
-    kappa: float,
+    kappa: float = None,
+    kappa_pos: float = None,
+    kappa_neg: float = None,
     include_bias: bool = True,
-    experimental_schedule=None,
+    initial_bias: float = 0.0,
+    bias_pseudo_label_param: Optional[float] = None,
+    experimental_schedule = None,
 ) -> AlgorithmConfig:
-    """Create a fixed-pi config unless an explicit experimental schedule is supplied."""
+    """Create a fixed-pi config unless an explicit experimental schedule is supplied.
+
+    ``initial_bias`` is used whether the bias is trainable or fixed.  When
+    ``bias_pseudo_label_param`` is omitted, the bias follows the ordinary
+    pseudo-label weight (including an experimental schedule).
+    """
 
     return AlgorithmConfig(
         n_iterations=T,
@@ -133,7 +413,11 @@ def make_algorithm_config(
         penalty_param=penalty,
         pseudo_label_param=pi,
         margin_threshold=kappa,
+        positive_margin=kappa_pos,
+        negative_margin=kappa_neg,
         include_bias=include_bias,
+        initial_bias=initial_bias,
+        bias_pseudo_label_param=bias_pseudo_label_param,
         experimental_schedule=experimental_schedule,
     )
 
@@ -150,22 +434,30 @@ def run_experiment(
     signal_std: float,
     algo_cfg: AlgorithmConfig,
     seed: int,
+    signal_mean: float = 0.0,
     K_w: Optional[int] = None,
     K_g: Optional[int] = None,
+    run_finite: bool = True,
     run_state_evolution: bool = True,
     aspect_ratio_tolerance: float = 1e-12,
     initialization_correlation: float = 0.0,
     metadata: Optional[dict[str, Any]] = None,
 ) -> ExperimentRun:
-    """Run finite GD and, optionally, its independent particle approximation.
+    """Run finite GD and/or its independent particle approximation.
 
     The finite initial labels are exogenous and the particle sampler uses the
     corresponding conditional law.  This is the canonical fixed-pi setup when
     ``algo_cfg.is_canonical_fixed_pi`` is true.
+
+    Set ``run_finite=False`` for state-evolution-only sweeps.  In that mode no
+    finite design matrix or test set is allocated, and the finite fields of the
+    returned :class:`ExperimentRun` are ``None``.
     """
 
     if d <= 0 or delta <= 0:
         raise ValueError("d and delta must be positive")
+    if not run_finite and not run_state_evolution:
+        raise ValueError("at least one of run_finite or run_state_evolution must be true")
     n = int(round(delta * d))
     if n <= 0:
         raise ValueError("delta*d must yield at least one training observation")
@@ -181,49 +473,52 @@ def run_experiment(
     law = FourCellSampleTypeLaw.product(
         label_prior=label_prior, supervision_ratio=rho
     )
-    finite_generator = torch.Generator().manual_seed(seed + 11)
-    mu = signal_std * torch.randn(d, generator=finite_generator)
-    initial_innovation = torch.randn(d, generator=finite_generator)
-    if signal_std == 0:
-        w_init = initial_innovation
-    else:
-        w_init = (
-            initialization_correlation * mu / signal_std
-            + np.sqrt(1.0 - initialization_correlation**2) * initial_innovation
+    environment = X = X_test = Y_test = callback = finite = None
+    mu = None
+    if run_finite:
+        finite_generator = torch.Generator().manual_seed(seed + 11)
+        mu = signal_std * torch.randn(d, generator=finite_generator) + signal_mean
+        initial_innovation = torch.randn(d, generator=finite_generator)
+        if signal_std == 0:
+            w_init = initial_innovation
+        else:
+            w_init = (
+                initialization_correlation * mu / signal_std
+                + np.sqrt(1.0 - initialization_correlation**2) * initial_innovation
+            )
+        dgp = IsotropicGaussian(
+            cfg=data_cfg,
+            n_train=n,
+            n_test=n_test,
+            dimensions=d,
+            seed=seed + 23,
+            signal_vector=mu,
+            sample_type_law=law,
         )
-    dgp = IsotropicGaussian(
-        cfg=data_cfg,
-        n_train=n,
-        n_test=n_test,
-        dimensions=d,
-        seed=seed + 23,
-        signal_vector=mu,
-        sample_type_law=law,
-    )
-    environment, X, X_test, Y_test = dgp.sample_full()
-    validate_finite_se_aspect_ratio(
-        environment, delta, tolerance=aspect_ratio_tolerance
-    )
-    init_generator = torch.Generator().manual_seed(seed + 31)
-    initialization = SelfTrainingInitialization(
-        b_init=0.0,
-        w_init=w_init,
-        Y_init=exogenous_initial_labels(environment, init_generator),
-    )
-    callback = TestEvaluatorCallback(
-        X_lab=X[environment.I_L],
-        Y_lab=environment.Y[environment.I_L],
-        X_unl=X[environment.I_U],
-        Y_unl=environment.Y[environment.I_U],
-        X_test=X_test,
-        Y_test=Y_test,
-        mu=environment.mu,
-        sigma=sigma,
-        p=label_prior,
-        metrics=DEFAULT_METRICS,
-    )
-    finite = SelfTrainedGradientDescent(cfg=algo_cfg, callback=callback)
-    finite.fit_full(X, environment, initialization)
+        environment, X, X_test, Y_test = dgp.sample_full()
+        validate_finite_se_aspect_ratio(
+            environment, delta, tolerance=aspect_ratio_tolerance
+        )
+        init_generator = torch.Generator().manual_seed(seed + 31)
+        initialization = SelfTrainingInitialization(
+            b_init=algo_cfg.initial_bias,
+            w_init=w_init,
+            Y_init=exogenous_initial_labels(environment, init_generator),
+        )
+        callback = TestEvaluatorCallback(
+            X_lab=X[environment.I_L],
+            Y_lab=environment.Y[environment.I_L],
+            X_unl=X[environment.I_U],
+            Y_unl=environment.Y[environment.I_U],
+            X_test=X_test,
+            Y_test=Y_test,
+            mu=environment.mu,
+            sigma=sigma,
+            p=label_prior,
+            metrics=DEFAULT_METRICS,
+        )
+        finite = SelfTrainedGradientDescent(cfg=algo_cfg, callback=callback)
+        finite.fit_full(X, environment, initialization)
 
     se = None
     if run_state_evolution:
@@ -237,22 +532,44 @@ def run_experiment(
             K_w=K_w,
             K_g=K_g,
             parameter_base_sampler=make_parameter_base_sampler(
-                signal_std, initialization_correlation
+                signal_std, initialization_correlation, signal_mean
             ),
             sample_base_sampler=state_evolution_sample_base_sampler(law),
         )
         se.compute_trajectory()
 
+    if callback is None:
+        finite_minimum_error = None
+        finite_minimum_error_iteration = None
+    else:
+        finite_error = np.asarray(callback.history_["population_error"], dtype=float)
+        finite_minimum_error_iteration = int(np.nanargmin(finite_error))
+        finite_minimum_error = float(finite_error[finite_minimum_error_iteration])
+
+    if se is None:
+        state_evolution_minimum_error = None
+        state_evolution_minimum_error_iteration = None
+    else:
+        state_evolution_error = np.asarray(se.error, dtype=float)
+        state_evolution_minimum_error_iteration = int(np.nanargmin(state_evolution_error))
+        state_evolution_minimum_error = float(
+            state_evolution_error[state_evolution_minimum_error_iteration]
+        )
+
     run_metadata = {
         "fixed_pi": algo_cfg.is_canonical_fixed_pi,
         "initialization": "exogenous independent Rademacher on unlabeled coordinates",
-        "finite_environment": "one iid draw of the product/MCAR special case",
+        "finite_environment": (
+            "one iid draw of the product/MCAR special case"
+            if run_finite
+            else "not generated (state-evolution-only run)"
+        ),
         "state_evolution": "independent particle approximation",
         "initialization_correlation": initialization_correlation,
     }
     if metadata:
         run_metadata.update(metadata)
-    return ExperimentRun(
+    run = ExperimentRun(
         name=name,
         data_cfg=data_cfg,
         algo_cfg=algo_cfg,
@@ -263,30 +580,52 @@ def run_experiment(
         finite=finite,
         callback=callback,
         se=se,
-        signal_scale=float(torch.linalg.vector_norm(mu) / np.sqrt(d)),
+        signal_scale=float(
+            torch.linalg.vector_norm(mu) / np.sqrt(d)
+            if mu is not None
+            else torch.linalg.vector_norm(se.signal) / np.sqrt(se.K_w)
+        ),
+        finite_minimum_error=finite_minimum_error,
+        finite_minimum_error_iteration=finite_minimum_error_iteration,
+        state_evolution_minimum_error=state_evolution_minimum_error,
+        state_evolution_minimum_error_iteration=state_evolution_minimum_error_iteration,
         metadata=run_metadata,
     )
+    _attach_error_diagnostics(run)
+    return run
+
+
+def _finite_state_observables_from_callback(
+    callback: TestEvaluatorCallback,
+) -> dict[str, np.ndarray]:
+    return {
+        "error": np.asarray(callback.history_["population_error"]),
+        "oracle_error": np.asarray(callback.history_["oracle_error"]),
+        "m": np.asarray(callback.history_["weight_signal_alignment"]),
+        "tau": np.asarray(callback.history_["weight_vector_norm"]),
+        "energy": np.asarray(callback.history_["weight_vector_norm"]) ** 2,
+        "bias": np.asarray(callback.history_["bias_term"]),
+        "oracle_bias": np.asarray(callback.history_["oracle_bias"]),
+    }
 
 
 def finite_state_observables(run: ExperimentRun) -> dict[str, np.ndarray]:
     """State-indexed finite macroscopic trajectories (length T+1)."""
 
     callback = run.callback
-    return {
-        "error": np.asarray(callback.history_["population_error"]),
-        "m": np.asarray(callback.history_["weight_signal_alignment"]),
-        "tau": np.asarray(callback.history_["weight_vector_norm"]),
-        "energy": np.asarray(callback.history_["weight_vector_norm"]) ** 2,
-        "bias": np.asarray(callback.history_["bias_term"]),
-    }
+    if callback is None:
+        raise ValueError("this run does not contain a finite-gradient trajectory")
+    return _finite_state_observables_from_callback(callback)
 
 
 def finite_update_observables(run: ExperimentRun) -> dict[str, np.ndarray]:
     """Update-indexed finite statistics, including selected-label precision."""
 
-    env = run.environment
+    env, finite = run.environment, run.finite
+    if env is None or finite is None:
+        raise ValueError("this run does not contain a finite-gradient trajectory")
     values = {key: [] for key in ("chi", "zeta", "omega", "accuracy", "correct_mass", "incorrect_mass")}
-    for step in run.finite.update_records_:
+    for step in finite.update_records_:
         selected = (env.Delta == 0) & (step.selection > 0)
         selected_count = int(selected.sum().item())
         correct = selected & (step.pseudo_labels == env.Y)
@@ -299,20 +638,129 @@ def finite_update_observables(run: ExperimentRun) -> dict[str, np.ndarray]:
     return {key: np.asarray(value) for key, value in values.items()}
 
 
+def _state_evolution_state_observables_from(
+    se: MacroscopicStateEvolution,
+) -> dict[str, np.ndarray]:
+    tau = as_numpy(se.weight_norm)
+    return {
+        "error": as_numpy(se.error),
+        "oracle_error": as_numpy(se.oracle_error),
+        "m": as_numpy(se.weight_signal_alignments),
+        "tau": tau,
+        "energy": tau**2,
+        "bias": as_numpy(se.bias),
+        "oracle_bias": as_numpy(se.oracle_bias),
+    }
+
+
 def state_evolution_state_observables(run: ExperimentRun) -> dict[str, np.ndarray]:
     """State-indexed particle trajectories."""
 
     if run.se is None:
         raise ValueError("this run does not contain state evolution")
-    se = run.se
-    tau = as_numpy(se.weight_norm)
-    return {
-        "error": as_numpy(se.error),
-        "m": as_numpy(se.weight_signal_alignments),
-        "tau": tau,
-        "energy": tau**2,
-        "bias": as_numpy(se.bias),
-    }
+    return _state_evolution_state_observables_from(run.se)
+
+
+def _attach_error_diagnostics(run: ExperimentRun) -> None:
+    """Attach post-processing diagnostics after all requested trajectories exist."""
+
+    diagnostics: dict[str, dict[str, np.ndarray]] = {}
+    p = run.data_cfg.label_prior
+    sigma = run.data_cfg.scale
+    if run.callback is not None:
+        finite_diagnostics = compute_error_diagnostics(
+            _finite_state_observables_from_callback(run.callback),
+            p=p,
+            sigma=sigma,
+            s_mu=run.signal_scale,
+        )
+        run.callback.error_diagnostics = finite_diagnostics
+        diagnostics["finite"] = finite_diagnostics
+    if run.se is not None:
+        state_evolution_diagnostics = compute_error_diagnostics(
+            _state_evolution_state_observables_from(run.se),
+            p=p,
+            sigma=sigma,
+            s_mu=run.signal_scale,
+        )
+        run.se.error_diagnostics = state_evolution_diagnostics
+        diagnostics["state_evolution"] = state_evolution_diagnostics
+    run.error_diagnostics = diagnostics
+
+
+def plot_state_evolution_oracle_bias_error(
+    run: ExperimentRun,
+    *,
+    ax=None,
+    show: bool = True,
+):
+    """Compare actual-bias and oracle-calibrated finite/SE errors.
+
+    This is a read-only diagnostic plot.  Within each source, both curves use
+    the same weight trajectory; only the intercept used in the oracle error
+    evaluation is replaced by its iteration-specific calibrated value.
+    """
+
+    if ax is None:
+        fig, ax = plt.subplots(figsize=(7.0, 4.5), constrained_layout=True)
+    else:
+        fig = ax.figure
+    multiple_sources = run.callback is not None and run.se is not None
+    if run.callback is not None:
+        finite = finite_state_observables(run)
+        iterations = np.arange(finite["error"].size)
+        ax.plot(
+            iterations,
+            finite["error"],
+            label=(
+                r"finite GD: $\mathcal{E}(w^t,b^t)$"
+                if multiple_sources
+                else r"$\mathcal{E}(w^t,b^t)$"
+            ),
+        )
+        ax.plot(
+            iterations,
+            finite["oracle_error"],
+            label=(
+                r"finite GD: $\mathcal{E}(w^t,b_{\rm oracle}^t)$"
+                if multiple_sources
+                else r"$\mathcal{E}(w^t,b_{\rm oracle}^t)$"
+            ),
+        )
+    if run.se is not None:
+        state_evolution = state_evolution_state_observables(run)
+        iterations = np.arange(state_evolution["error"].size)
+        ax.plot(
+            iterations,
+            state_evolution["error"],
+            label=(
+                r"state evolution: $\mathcal{E}(w^t,b^t)$"
+                if multiple_sources
+                else r"$\mathcal{E}(w^t,b^t)$"
+            ),
+        )
+        ax.plot(
+            iterations,
+            state_evolution["oracle_error"],
+            label=(
+                r"state evolution: $\mathcal{E}(w^t,b_{\rm oracle}^t)$"
+                if multiple_sources
+                else r"$\mathcal{E}(w^t,b_{\rm oracle}^t)$"
+            ),
+        )
+    if run.callback is None and run.se is None:
+        raise ValueError("this run contains neither finite GD nor state evolution")
+    ax.set(
+        xlabel="iteration",
+        ylabel="population classification error",
+        title=f"{run.name}: oracle-calibrated bias diagnostic",
+    )
+    ax.grid(True, which="major", linestyle="-", linewidth=0.8, alpha=0.8)
+    ax.grid(True, which="minor", linestyle=":", linewidth=0.5, alpha=0.6)
+    ax.legend()
+    if show:
+        plt.show()
+    return fig, ax
 
 
 def state_evolution_update_observables(run: ExperimentRun) -> dict[str, np.ndarray]:
@@ -359,8 +807,10 @@ def class_conditional_update_observables(
     }
 
     if source == "finite":
-        env = run.environment
-        for step in run.finite.update_records_:
+        env, finite = run.environment, run.finite
+        if env is None or finite is None:
+            raise ValueError("this run does not contain a finite-gradient trajectory")
+        for step in finite.update_records_:
             selected = (env.Delta == 0) & (step.selection > 0)
             for name, label in classes.items():
                 class_mask = (env.Y == label) & (env.Delta == 0)
@@ -671,25 +1121,144 @@ def run_oracle_selected_label_counterfactual(run: ExperimentRun) -> tuple[SelfTr
     not a realizable self-training algorithm or a theorem claim.
     """
 
-    env, X = run.environment, run.X
+    env, X, X_test, Y_test, finite = (
+        run.environment,
+        run.X,
+        run.X_test,
+        run.Y_test,
+        run.finite,
+    )
+    if any(value is None for value in (env, X, X_test, Y_test, finite)):
+        raise ValueError(
+            "the finite oracle requires a run created with run_finite=True"
+        )
     callback = TestEvaluatorCallback(
         X_lab=X[env.I_L],
         Y_lab=env.Y[env.I_L],
         X_unl=X[env.I_U],
         Y_unl=env.Y[env.I_U],
-        X_test=run.X_test,
-        Y_test=run.Y_test,
+        X_test=X_test,
+        Y_test=Y_test,
         mu=env.mu,
         sigma=run.data_cfg.scale,
         p=run.data_cfg.label_prior,
         metrics=DEFAULT_METRICS,
     )
     learner = SelfTrainedGradientDescent(cfg=run.algo_cfg, callback=callback)
-    assert run.finite.initialization_ is not None
+    assert finite.initialization_ is not None
 
     def oracle_labels(_t: int, scores: torch.Tensor, _initial: torch.Tensor) -> torch.Tensor:
         return env.Y.to(dtype=scores.dtype, device=scores.device)
 
     with patch("src.algorithms.pseudo_labels", oracle_labels):
-        learner.fit_full(X, env, run.finite.initialization_)
+        learner.fit_full(X, env, finite.initialization_)
+    callback.error_diagnostics = compute_error_diagnostics(
+        _finite_state_observables_from_callback(callback),
+        p=run.data_cfg.label_prior,
+        sigma=run.data_cfg.scale,
+        s_mu=run.signal_scale,
+    )
     return learner, callback
+
+
+def run_state_evolution_oracle_selected_label_counterfactual(
+    run: ExperimentRun,
+) -> MacroscopicStateEvolution:
+    """Run the selected-label oracle counterfactual in state evolution.
+
+    The returned trajectory has exactly the same particle base law, Gaussian
+    innovations, confidence selection rule, and optimization configuration as
+    ``run.se``.  Only the pseudo-label target is changed: selected unlabeled
+    particles use their true label at every update.  Consequently this is the
+    mean-field counterpart of :func:`run_oracle_selected_label_counterfactual`,
+    and likewise a theorem-external diagnostic rather than a realizable
+    self-training procedure.
+    """
+
+    source = run.se
+    if source is None:
+        raise ValueError("this run does not contain state evolution")
+    if source.initial_pseudo_label is None:
+        raise ValueError("state evolution must have an explicit initial pseudo-label law")
+    initial_weight = source.weight[0]
+    initial_bias = source.bias[0]
+    if initial_weight is None or initial_bias is None:
+        raise RuntimeError("state-evolution initial state is unavailable")
+
+    def parameter_base_sampler(
+        size: int, _generator: torch.Generator, dtype: torch.dtype, device: torch.device
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if size != source.K_w:
+            raise RuntimeError("oracle parameter particle count does not match its source run")
+        return (
+            source.signal.to(dtype=dtype, device=device).detach().clone(),
+            initial_weight.to(dtype=dtype, device=device).detach().clone(),
+        )
+
+    def sample_base_sampler(
+        size: int, _generator: torch.Generator, dtype: torch.dtype, device: torch.device
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        if size != source.K_g:
+            raise RuntimeError("oracle sample particle count does not match its source run")
+        return (
+            source.label.to(dtype=dtype, device=device).detach().clone(),
+            source.indicator.to(dtype=dtype, device=device).detach().clone(),
+            source.initial_pseudo_label.to(dtype=dtype, device=device).detach().clone(),
+        )
+
+    oracle = MacroscopicStateEvolution(
+        data_cfg=run.data_cfg,
+        algo_cfg=run.algo_cfg,
+        mc_seed=source.mc_seed,
+        K=None,
+        K_w=source.K_w,
+        K_g=source.K_g,
+        initial_bias=float(initial_bias),
+        eps_rank=source.eps_rank,
+        lstsq_rcond=source.lstsq_rcond,
+        lstsq_driver=source.lstsq_driver,
+        dtype=source.dtype,
+        device=source.device,
+        parameter_base_sampler=parameter_base_sampler,
+        sample_base_sampler=sample_base_sampler,
+    )
+
+    def oracle_pseudo_residual(
+        *,
+        preactivation: torch.Tensor,
+        label: torch.Tensor,
+        indicator: torch.Tensor,
+        selection_mask: torch.Tensor,
+        selection_rate: float,
+        coef: float,
+        rho: float,
+        eta: float,
+        loss_function: Any,
+        **_unused: Any,
+    ) -> torch.Tensor:
+        return pseudo_residual(
+            scores=preactivation,
+            Y=label,
+            Delta=indicator.to(dtype=preactivation.dtype),
+            Yhat=label,
+            selection=selection_mask,
+            omega=selection_rate,
+            pi=coef,
+            eta=eta,
+            rho=rho,
+            loss_function=loss_function,
+        )
+
+    with patch.object(
+        asymptotics_module,
+        "compute_abstract_pseudo_residual_from",
+        oracle_pseudo_residual,
+    ):
+        oracle.compute_trajectory()
+    oracle.error_diagnostics = compute_error_diagnostics(
+        _state_evolution_state_observables_from(oracle),
+        p=run.data_cfg.label_prior,
+        sigma=run.data_cfg.scale,
+        s_mu=run.signal_scale,
+    )
+    return oracle

@@ -1,6 +1,7 @@
 import torch
 torch.set_default_dtype(torch.float64)
 
+import math
 from dataclasses import dataclass, field
 from typing import Callable, Optional, Protocol
 
@@ -91,6 +92,8 @@ class AlgorithmConfig:
     penalty_function: Penalty = field(default_factory=RidgePenalty)
     selection_function: SelectionFunction = field(default_factory=HardSelection) # Selection strategy
     experimental_schedule: Optional[PseudoLabelSchedule] = None
+    initial_bias: float = 0.0
+    bias_pseudo_label_param: Optional[float] = None  # \pi_b; None follows \pi^t
     
     # Internal schedule stored as a list of floats
     pseudo_label_param_schedule_: list[float] = field(init=False, default_factory=list)
@@ -107,6 +110,16 @@ class AlgorithmConfig:
             raise ValueError("penalty_param must be nonnegative")
         if self.pseudo_label_param < 0:
             raise ValueError("pseudo_label_param must be nonnegative")
+        if not math.isfinite(float(self.initial_bias)):
+            raise ValueError("initial_bias must be finite")
+        if (
+            self.bias_pseudo_label_param is not None
+            and (
+                not math.isfinite(float(self.bias_pseudo_label_param))
+                or self.bias_pseudo_label_param < 0
+            )
+        ):
+            raise ValueError("bias_pseudo_label_param must be finite and nonnegative")
 
         if self.margin_threshold is not None:
             if self.positive_margin is None:
@@ -147,6 +160,19 @@ class AlgorithmConfig:
         if t < 0 or t >= self.n_iterations:
             raise IndexError(f"iteration {t} is outside [0, {self.n_iterations})")
         return self.pseudo_label_param_schedule_[t]
+
+    def get_bias_pseudo_label_weight(self, t: int) -> float:
+        r"""Return the bias pseudo-label weight \pi_b^t at iteration ``t``.
+
+        An unspecified bias-specific weight follows the ordinary pseudo-label
+        schedule exactly, preserving the historical dynamics.  An explicitly
+        configured value is fixed across iterations.
+        """
+
+        weight = self.get_pseudo_label_weight(t)
+        if self.bias_pseudo_label_param is None:
+            return weight
+        return float(self.bias_pseudo_label_param)
 
     @property
     def is_canonical_fixed_pi(self) -> bool:

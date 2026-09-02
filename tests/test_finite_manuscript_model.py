@@ -6,12 +6,17 @@ import pytest
 import torch
 
 from src.algorithms import SelfTrainedGradientDescent
+from src.callbacks import TestEvaluatorCallback as EvaluatorCallback
 from src.config import AlgorithmConfig, DataConfig, LinearRampSchedule
 from src.dgp import IsotropicGaussian
 from src.environment import FourCellSampleTypeLaw, QuenchedEnvironment
 from src.initialization import SelfTrainingInitialization, compute_pseudo_labels_from_scores, compute_scores
-from src.performance import bayes_parameters, population_error
-from src.primitives import hard_selection, normalized_selection, pseudo_labels, selection_rate
+from src.performance import (
+    bayes_parameters,
+    oracle_calibrated_bias_and_error,
+    population_error,
+)
+from src.primitives import hard_selection, normalized_selection, pseudo_labels, pseudo_residual, selection_rate
 
 
 def _cfg(T=2, pi=1.5):
@@ -84,6 +89,86 @@ def test_fixed_pi_is_canonical_and_ramps_are_explicit_extensions():
     assert [ramped.get_pseudo_label_weight(t) for t in range(3)] == [0., 0., .8]
 
 
+def test_bias_configuration_defaults_preserve_the_weight_pseudo_label_schedule():
+    fixed = _cfg(T=2, pi=.8)
+    assert fixed.initial_bias == 0.0
+    assert fixed.bias_pseudo_label_param is None
+    assert [fixed.get_bias_pseudo_label_weight(t) for t in range(2)] == [.8, .8]
+
+    ramped = AlgorithmConfig(
+        3,
+        .1,
+        .0,
+        .8,
+        margin_threshold=.5,
+        experimental_schedule=LinearRampSchedule(1, 2),
+    )
+    assert [ramped.get_bias_pseudo_label_weight(t) for t in range(3)] == [0., 0., .8]
+
+
+def test_nonzero_disabled_bias_is_fixed_and_used_in_every_finite_logit():
+    env, X, _, _, init = _problem()
+    fixed_bias = 0.6
+    cfg = AlgorithmConfig(
+        3,
+        .2,
+        .3,
+        1.5,
+        margin_threshold=.5,
+        include_bias=False,
+        initial_bias=fixed_bias,
+    )
+    fixed_init = SelfTrainingInitialization(fixed_bias, init.w_init, init.Y_init)
+    learner = SelfTrainedGradientDescent(cfg).fit_full(X, env, fixed_init)
+
+    torch.testing.assert_close(learner.bias, torch.tensor(fixed_bias))
+    for step in learner.update_records_:
+        torch.testing.assert_close(step.bias, torch.tensor(fixed_bias))
+        torch.testing.assert_close(step.scores, compute_scores(X, fixed_bias, step.weight))
+    torch.testing.assert_close(learner.decision_function(X), compute_scores(X, fixed_bias, learner.weights))
+
+
+def test_bias_pseudo_label_weight_changes_only_the_one_step_bias_update():
+    env, X, _, _, init = _problem()
+    common = dict(
+        n_iterations=1,
+        step_size=.2,
+        penalty_param=.3,
+        pseudo_label_param=1.5,
+        margin_threshold=.5,
+        include_bias=True,
+    )
+    default = SelfTrainedGradientDescent(AlgorithmConfig(**common)).fit_full(X, env, init)
+    explicit = SelfTrainedGradientDescent(
+        AlgorithmConfig(**common, bias_pseudo_label_param=1.5)
+    ).fit_full(X, env, init)
+    labeled_only = SelfTrainedGradientDescent(
+        AlgorithmConfig(**common, bias_pseudo_label_param=0.0)
+    ).fit_full(X, env, init)
+
+    torch.testing.assert_close(default.weights, explicit.weights)
+    torch.testing.assert_close(default.bias, explicit.bias)
+    torch.testing.assert_close(default.update_records_[0].g, labeled_only.update_records_[0].g)
+    torch.testing.assert_close(default.weights, labeled_only.weights)
+
+    step = labeled_only.update_records_[0]
+    expected_bias_residual = pseudo_residual(
+        scores=step.scores,
+        Y=env.Y,
+        Delta=env.Delta,
+        Yhat=step.pseudo_labels,
+        selection=step.selection,
+        omega=step.omega,
+        pi=0.0,
+        eta=labeled_only.cfg.step_size,
+        rho=env.rho,
+        loss_function=labeled_only.cfg.loss_function,
+    )
+    torch.testing.assert_close(step.bias_residual, expected_bias_residual)
+    torch.testing.assert_close(labeled_only.bias, step.bias + expected_bias_residual.mean())
+    assert not torch.equal(default.bias, labeled_only.bias)
+
+
 def test_finite_update_matches_objective_and_forward_backward_decomposition():
     env, X, U, sigma, init = _problem()
     cfg = _cfg(T=2)
@@ -105,6 +190,71 @@ def test_finite_update_matches_objective_and_forward_backward_decomposition():
     obs = learner.macroscopic_observables(0)
     torch.testing.assert_close(obs["chi"], step.chi)
     torch.testing.assert_close(obs["zeta"], step.zeta)
+
+
+def test_finite_oracle_bias_diagnostic_uses_existing_macroscopic_normalization():
+    env, X, _, sigma, init = _problem()
+    p = 0.6
+    callback = EvaluatorCallback(
+        X_lab=X[env.I_L],
+        Y_lab=env.Y[env.I_L],
+        X_unl=X[env.I_U],
+        Y_unl=env.Y[env.I_U],
+        mu=env.mu,
+        sigma=sigma,
+        p=p,
+        metrics={"population_error"},
+    )
+    learner = SelfTrainedGradientDescent(_cfg(T=2), callback=callback).fit_full(
+        X, env, init
+    )
+
+    for t, weight in enumerate(learner.weight_history_):
+        alignment = torch.dot(weight, env.mu).item() / env.d
+        weight_scale = torch.linalg.vector_norm(weight).item() / math.sqrt(env.d)
+        expected_bias, expected_error = oracle_calibrated_bias_and_error(
+            alignment,
+            weight_scale,
+            sigma,
+            p,
+            machine_epsilon=torch.finfo(weight.dtype).eps,
+        )
+        assert callback.history_["weight_signal_alignment"][t] == pytest.approx(
+            alignment
+        )
+        assert callback.history_["weight_vector_norm"][t] == pytest.approx(
+            weight_scale
+        )
+        assert callback.history_["oracle_bias"][t] == pytest.approx(expected_bias)
+        assert callback.history_["oracle_error"][t] == pytest.approx(expected_error)
+
+
+def test_finite_oracle_bias_diagnostic_does_not_change_the_trajectory():
+    env, X, _, sigma, init = _problem()
+    callback = EvaluatorCallback(
+        X_lab=X[env.I_L],
+        Y_lab=env.Y[env.I_L],
+        X_unl=X[env.I_U],
+        Y_unl=env.Y[env.I_U],
+        mu=env.mu,
+        sigma=sigma,
+        p=0.6,
+        metrics={"population_error"},
+    )
+    with_diagnostic = SelfTrainedGradientDescent(
+        _cfg(T=2), callback=callback
+    ).fit_full(X, env, init)
+    without_callback = SelfTrainedGradientDescent(_cfg(T=2)).fit_full(
+        X, env, init
+    )
+
+    torch.testing.assert_close(with_diagnostic.bias, without_callback.bias)
+    torch.testing.assert_close(with_diagnostic.weights, without_callback.weights)
+    for actual, reference in zip(
+        with_diagnostic.update_records_, without_callback.update_records_
+    ):
+        torch.testing.assert_close(actual.scores, reference.scores)
+        torch.testing.assert_close(actual.g, reference.g)
 
 
 def test_bayes_benchmark_uses_actual_signal_scale():

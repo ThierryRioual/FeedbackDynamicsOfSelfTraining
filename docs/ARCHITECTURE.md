@@ -43,12 +43,30 @@ g_i^t=-\eta\left\{\frac{\Delta_i}{\rho}\ell'(Y_i,r_i^t)+
 \ell'(\widehat Y_i^t,r_i^t)\right\},
 $$
 
-with a zero unlabeled term when `omega=0`, then applies
+with a zero unlabeled term when `omega=0`.  The weight-vector update always
+uses this residual with pseudo-label coefficient `pseudo_label_param`.  The
+bias uses the companion residual
 
 $$
-b^{t+1}=b^t+n^{-1}{\bf1}^Tg^t,quad
+g_{b,i}^t=-\eta\left\{\frac{\Delta_i}{\rho}\ell'(Y_i,r_i^t)+
+\frac{(1-\Delta_i)\pi_b}{1-\rho}\frac{S_i^t}{\omega^t}
+\ell'(\widehat Y_i^t,r_i^t)\right\},
+$$
+
+whose labeled contribution is unchanged.  If `bias_pseudo_label_param` is
+omitted, $\pi_b$ follows the ordinary pseudo-label weight (including an
+experimental schedule).  The updates are
+
+$$
+b^{t+1}=b^t+n^{-1}{\bf1}^Tg_b^t,\quad
 w^{t+1}=w^t-\eta\lambda\nabla J(w^t)+\sqrt d\,X^Tg^t/n.
 $$
+
+`AlgorithmConfig.initial_bias` defaults to zero.  The value $b^0$ is included
+in every logit regardless of `include_bias`; that flag controls only whether
+the bias update is applied.  Thus `include_bias=False` defines a fixed
+intercept, which may be nonzero.  Explicit initialization arguments in the
+low-level finite and state-evolution APIs override the configuration default.
 
 The legacy split `fit(X_lab,Y_lab,X_unl,...)` is only an adapter.  It never
 silently uses `sign(r0)`: users can explicitly call
@@ -71,6 +89,20 @@ No production Gram inverse or autograd response is used.
 to its existing low-level sampler.  `theorem_trajectory` presents
 `(W_T,Q_T,R_T,G_{T-1},P_{T-1})`; internally retained `g^T,p^T` remain auxiliary
 diagnostics.
+
+Finite GD and state evolution also record a common, non-recursive oracle-bias
+diagnostic.  For their shared test-score convention
+$R^t=b^t+m^tY+\sigma\tau^tZ$, it evaluates
+
+$$
+b_{\rm oracle}^t=\frac{\sigma^2(\tau^t)^2}{2m^t}
+\log\frac{p}{1-p}
+$$
+
+and the population error obtained by replacing only the evaluation intercept
+$b^t$ with $b_{\rm oracle}^t$.  The actual $b^t$ remains in every finite and
+effective-process update.  The oracle quantities are recorded as `NaN` when
+$m^t$ is numerically zero.
 
 ## Reproducibility and extensions
 

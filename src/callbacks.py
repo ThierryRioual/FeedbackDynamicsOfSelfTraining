@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from typing import List, Dict, Set, Optional, Literal
 
 from src.algorithms import SelfTrainedGradientDescent
+from src.performance import oracle_calibrated_bias_and_error
 from src.utils import compute_abstract_pseudo_residual_from, compute_population_error_from
 
 MetricName = Literal[
@@ -56,6 +57,8 @@ class TestEvaluatorCallback:
     - "bias_term": Tracks the value of the intercept (b)
     - "weight_vector_norm": Tracks the norm of the weight vector (||w||)
     - "weight_signal_alignment": Tracks the overlap between w and mu (requires mu)
+    - Requesting "population_error" also records the auxiliary histories
+      "oracle_bias" and "oracle_error" using the same weight observables.
     ---- 5. Selection terms ----
     - "unl_usage": Fraction of unlabeled samples used for pseudo-labeling
     - "unl_flipping_rate": Rate of label flipping in unlabeled data across iterations
@@ -75,7 +78,7 @@ class TestEvaluatorCallback:
     Y_train: Optional[torch.Tensor] = field(init=False, default=None)
 
     metrics: Set[MetricName] = field(
-        default_factory=lambda: {"test_error"} 
+        default_factory=lambda: {"population_error"}
     )
 
     history_: Dict[str, List[float]] = field(init=False, default_factory=dict)
@@ -98,6 +101,9 @@ class TestEvaluatorCallback:
 
         for metric in self.metrics:
             self.history_[metric] = []
+        if "population_error" in self.metrics:
+            self.history_["oracle_bias"] = []
+            self.history_["oracle_error"] = []
 
         if self.X_lab is not None and self.X_unl is not None:
             self.X_train = torch.cat([self.X_lab, self.X_unl])
@@ -320,11 +326,22 @@ class TestEvaluatorCallback:
             self.history_["weight_signal_alignment"].append(alignment)
 
         if "population_error" in self.metrics:
+            alignment = self.history_["weight_signal_alignment"][-1]
+            weight_scale = self.history_["weight_vector_norm"][-1]
             pop_err = compute_population_error_from(
                 b=self.history_["bias_term"][-1],
-                m=self.history_["weight_signal_alignment"][-1],
-                tau=self.history_["weight_vector_norm"][-1],
+                m=alignment,
+                tau=weight_scale,
                 sigma=self.sigma,
                 p=self.p
             )
             self.history_["population_error"].append(pop_err)
+            oracle_bias, oracle_error = oracle_calibrated_bias_and_error(
+                alignment,
+                weight_scale,
+                self.sigma,
+                self.p,
+                machine_epsilon=torch.finfo(learner.weights.dtype).eps,
+            )
+            self.history_["oracle_bias"].append(oracle_bias)
+            self.history_["oracle_error"].append(oracle_error)

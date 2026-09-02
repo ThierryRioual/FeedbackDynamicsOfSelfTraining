@@ -20,6 +20,7 @@ import torch
 
 from src.config import AlgorithmConfig, DataConfig
 from src.orthogonal import EmpiricalOrthogonalBasis, solve_transported_history
+from src.performance import oracle_calibrated_bias_and_error
 from src.utils import (
     compute_abstract_pseudo_residual_from,
     compute_population_error_from,
@@ -73,7 +74,11 @@ class MacroscopicStateEvolution:
     sample law has no exogenous ``Y_init`` and is therefore accepted at the
     first update only when the pseudo-labeled coefficient is zero.
 
-    Bias handling remains single-sourced by ``algo_cfg.include_bias``.
+    Bias handling is configured by ``algo_cfg``: ``initial_bias`` sets the
+    default intercept, ``include_bias`` controls whether it is updated, and
+    ``bias_pseudo_label_param`` controls only its pseudo-labeled increment.
+    The constructor's optional ``initial_bias`` remains a compatibility
+    override for an explicitly supplied initial condition.
     """
 
     data_cfg: DataConfig
@@ -81,7 +86,7 @@ class MacroscopicStateEvolution:
 
     mc_seed: int = 42
     K: Optional[int] = 1000
-    initial_bias: Optional[float] = 0.0
+    initial_bias: Optional[float] = None
     initial_weight: Optional[torch.Tensor] = None
 
     K_w: Optional[int] = None
@@ -107,6 +112,7 @@ class MacroscopicStateEvolution:
     weight: List[Optional[torch.Tensor]] = field(init=False)
     preactivation: List[Optional[torch.Tensor]] = field(init=False)
     residual: List[Optional[torch.Tensor]] = field(init=False)
+    bias_residual: List[Optional[torch.Tensor]] = field(init=False)
 
     # Compatibility names: forward_noise is q and backward_noise is p.
     forward_noise: List[Optional[torch.Tensor]] = field(init=False)
@@ -142,9 +148,12 @@ class MacroscopicStateEvolution:
     weight_signal_alignments: List[Optional[torch.Tensor]] = field(init=False)
     label_residual_alignments: List[Optional[torch.Tensor]] = field(init=False)
     mean_residual: List[Optional[torch.Tensor]] = field(init=False)
+    mean_bias_residual: List[Optional[torch.Tensor]] = field(init=False)
     selection_rate: List[Optional[torch.Tensor]] = field(init=False)
     weight_norm: List[Optional[float]] = field(init=False)
     error: List[Optional[float]] = field(init=False)
+    oracle_bias: List[Optional[float]] = field(init=False)
+    oracle_error: List[Optional[float]] = field(init=False)
     decay: List[Optional[torch.Tensor]] = field(init=False)
 
     weight_basis: EmpiricalOrthogonalBasis = field(init=False)
@@ -174,19 +183,17 @@ class MacroscopicStateEvolution:
             self.initial_pseudo_label,
         ) = self._sample_sample_base(sample_generator)
 
-        initial_bias_value = 0.0 if self.initial_bias is None else self.initial_bias
+        initial_bias_value = (
+            self.algo_cfg.initial_bias
+            if self.initial_bias is None
+            else self.initial_bias
+        )
         initial_bias = torch.as_tensor(
             initial_bias_value, dtype=self.dtype, device=self.device
         )
         if initial_bias.numel() != 1 or not torch.isfinite(initial_bias).all():
             raise ValueError("initial_bias must be a finite scalar")
         initial_bias = initial_bias.reshape(()).detach().clone()
-        if not self.algo_cfg.include_bias:
-            if initial_bias.item() != 0.0:
-                raise ValueError(
-                    "initial_bias must be zero when include_bias=False"
-                )
-            initial_bias.zero_()
         self.initial_bias = initial_bias
         self.initial_weight = sampled_weight
 
@@ -198,6 +205,7 @@ class MacroscopicStateEvolution:
 
         self.preactivation = [None] * length
         self.residual = [None] * length
+        self.bias_residual = [None] * length
         self.forward_noise = [None] * length
         self.backward_noise = [None] * length
 
@@ -230,6 +238,7 @@ class MacroscopicStateEvolution:
             "weight_signal_alignments",
             "label_residual_alignments",
             "mean_residual",
+            "mean_bias_residual",
             "selection_rate",
             "decay",
         )
@@ -241,6 +250,8 @@ class MacroscopicStateEvolution:
         self.residual_rank_truncated = [None] * length
         self.weight_norm = [None] * length
         self.error = [None] * length
+        self.oracle_bias = [None] * length
+        self.oracle_error = [None] * length
 
         self.weight_basis = EmpiricalOrthogonalBasis(
             self.K_w,
@@ -500,10 +511,16 @@ class MacroscopicStateEvolution:
             )
             < self.rho
         ).to(self.dtype)
-        if self._pseudo_weight(0) != 0.0 and self.rho < 1.0:
+        bias_pseudo_weight = (
+            self._bias_pseudo_weight(0) if self.algo_cfg.include_bias else 0.0
+        )
+        if (
+            (self._pseudo_weight(0) != 0.0 or bias_pseudo_weight != 0.0)
+            and self.rho < 1.0
+        ):
             raise ValueError(
                 "an explicit sample_base_sampler returning exogenous Y_init is "
-                "required when the t=0 pseudo-labeled coefficient is nonzero"
+                "required when a t=0 pseudo-labeled coefficient is nonzero"
             )
         return label, indicator, None
 
@@ -645,6 +662,13 @@ class MacroscopicStateEvolution:
         if self.T == 0:
             return 0.0
         return self.algo_cfg.get_pseudo_label_weight(min(t, self.T - 1))
+
+    def _bias_pseudo_weight(self, t: int) -> float:
+        """Bias analogue of :meth:`_pseudo_weight`, including terminal diagnostics."""
+
+        if self.T == 0:
+            return 0.0
+        return self.algo_cfg.get_bias_pseudo_label_weight(min(t, self.T - 1))
 
     def _check_time_access(self, t: int) -> None:
         if not isinstance(t, int) or t < 0 or t > self._current_t or t > self.T:
@@ -791,8 +815,7 @@ class MacroscopicStateEvolution:
         bias = self.bias[t]
         if bias is None:
             raise RuntimeError(f"b^{t} has not been computed")
-        effective_bias = bias if self.algo_cfg.include_bias else bias.new_zeros(())
-        r = effective_bias + m * self.label + self.sigma * q
+        r = bias + m * self.label + self.sigma * q
         self.preactivation[t] = r
         omega = self.compute_selection_rate(t)
         pseudo_weight = self._pseudo_weight(t)
@@ -808,6 +831,20 @@ class MacroscopicStateEvolution:
         if g.shape != (self.K_g,):
             raise RuntimeError("g must live in sample-particle space")
         self.residual[t] = g
+        bias_pseudo_weight = self._bias_pseudo_weight(t)
+        self.bias_residual[t] = (
+            g
+            if bias_pseudo_weight == pseudo_weight
+            else self.compute_pseudo_residual_from(
+                r,
+                self.label,
+                self.indicator,
+                bias_pseudo_weight,
+                omega,
+                time_index=t,
+                initial_pseudo_label=self.initial_pseudo_label,
+            )
+        )
 
         self.weight_projection_coordinates[t] = beta_w
         self.weight_coordinates[t] = projection.theta
@@ -888,7 +925,13 @@ class MacroscopicStateEvolution:
         p = self.backward_noise[t]
 
         chi = self.compute_label_residual_alignments(t)
-        zeta = self.compute_mean_residual(t)
+        weight_zeta = self.compute_mean_residual(t)
+        zeta = (
+            weight_zeta
+            if self.bias_residual[t] is self.residual[t]
+            else self.compute_mean_bias_residual(t)
+        )
+        self.mean_bias_residual[t] = zeta
         current_weight = self.weight[t]
         current_bias = self.bias[t]
         if self.decay[t] is None:
@@ -905,7 +948,7 @@ class MacroscopicStateEvolution:
         next_bias = (
             current_bias + zeta
             if self.algo_cfg.include_bias
-            else current_bias.new_zeros(())
+            else current_bias.detach().clone()
         )
         next_weight = (
             current_weight
@@ -972,6 +1015,16 @@ class MacroscopicStateEvolution:
             self.mean_residual[t] = torch.mean(self.residual[t]).detach()
         return self.mean_residual[t]
 
+    def compute_mean_bias_residual(self, t: int) -> torch.Tensor:
+        """Mean residual governing the scalar bias update at iteration ``t``."""
+
+        self._check_time_access(t)
+        if self.bias_residual[t] is None:
+            raise RuntimeError(f"bias residual at time {t} has not been computed")
+        if self.mean_bias_residual[t] is None:
+            self.mean_bias_residual[t] = torch.mean(self.bias_residual[t]).detach()
+        return self.mean_bias_residual[t]
+
     def compute_weight_norm(self, t: int) -> float:
         self._check_time_access(t)
         if self.weight_norm[t] is None:
@@ -1006,16 +1059,44 @@ class MacroscopicStateEvolution:
             self.compute_weight_signal_alignment(t)
         if self.weight_norm[t] is None:
             self.compute_weight_norm(t)
-        bias = self.bias[t].item() if self.algo_cfg.include_bias else 0.0
+        bias = self.bias[t].item()
+        alignment = float(self.weight_signal_alignments[t])
+        weight_scale = float(self.weight_norm[t])
         result = compute_population_error_from(
             bias,
-            float(self.weight_signal_alignments[t]),
-            float(self.weight_norm[t]),
+            alignment,
+            weight_scale,
             self.sigma,
             self.p,
         )
         self.error[t] = result
+        self._compute_oracle_bias_diagnostic(t, alignment, weight_scale)
         return result
+
+    def _compute_oracle_bias_diagnostic(
+        self, t: int, alignment: float, weight_scale: float
+    ) -> None:
+        """Record the error-optimal intercept without changing the recursion.
+
+        Under this module's score convention ``b + m Y + sigma tau Z``, the
+        population-error stationarity equation is
+
+        ``2 b m = sigma**2 * tau**2 * log(p / (1 - p))``.
+
+        The resulting intercept is used only in a second population-error
+        evaluation.  The actual bias history, preactivations, residuals, and
+        parameter updates are left untouched.
+        """
+
+        self.oracle_bias[t], self.oracle_error[t] = (
+            oracle_calibrated_bias_and_error(
+                alignment,
+                weight_scale,
+                self.sigma,
+                self.p,
+                machine_epsilon=torch.finfo(self.dtype).eps,
+            )
+        )
 
     @property
     def weight_grammian(self) -> torch.Tensor:

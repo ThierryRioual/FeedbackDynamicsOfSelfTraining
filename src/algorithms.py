@@ -32,6 +32,7 @@ class FiniteStep:
     selection: torch.Tensor
     omega: torch.Tensor
     g: torch.Tensor
+    bias_residual: torch.Tensor
     m: torch.Tensor
     chi: torch.Tensor
     zeta: torch.Tensor
@@ -86,14 +87,9 @@ class SelfTrainedGradientDescent:
                 "it never creates Y_init from sign(r^0)"
             )
         init = initialization.for_environment(environment)
-        if not self.cfg.include_bias and float(init.b_init) != 0.0:
-            raise ValueError("b_init must be zero when include_bias=False")
-
         self.environment_ = environment
         self.initialization_ = init
         self.bias = torch.as_tensor(init.b_init, dtype=X.dtype, device=X.device).detach().clone().reshape(())
-        if not self.cfg.include_bias:
-            self.bias.zero_()
         self.weights = init.w_init.detach().clone()
         self.update_records_ = []
         self.score_history_ = []
@@ -110,7 +106,7 @@ class SelfTrainedGradientDescent:
         for t in range(self.cfg.n_iterations):
             b_current = self.bias
             w_current = self.weights
-            scores = compute_scores(X, b_current if self.cfg.include_bias else 0.0, w_current)
+            scores = compute_scores(X, b_current, w_current)
             Yhat = pseudo_labels(t, scores, init.Y_init)
             selection = self.cfg.selection_function(scores, self.cfg.positive_margin, self.cfg.negative_margin)
             # Labeled selection is irrelevant, but setting it to zero makes the
@@ -130,9 +126,22 @@ class SelfTrainedGradientDescent:
                 rho=environment.rho,
                 loss_function=self.cfg.loss_function,
             )
+            bias_pi = self.cfg.get_bias_pseudo_label_weight(t)
+            bias_residual = g if bias_pi == pi else pseudo_residual(
+                scores=scores,
+                Y=environment.Y,
+                Delta=environment.Delta,
+                Yhat=Yhat,
+                selection=selection,
+                omega=omega,
+                pi=bias_pi,
+                eta=self.cfg.step_size,
+                rho=environment.rho,
+                loss_function=self.cfg.loss_function,
+            )
             m = torch.dot(environment.mu, w_current) / environment.d
             chi = torch.dot(environment.Y, g) / environment.n
-            zeta = torch.mean(g)
+            zeta = torch.mean(bias_residual)
             tau = torch.linalg.vector_norm(w_current) / (environment.d ** 0.5)
             record = FiniteStep(
                 t=t,
@@ -141,6 +150,7 @@ class SelfTrainedGradientDescent:
                 selection=selection.detach().clone(),
                 omega=omega.detach().clone(),
                 g=g.detach().clone(),
+                bias_residual=bias_residual.detach().clone(),
                 m=m.detach().clone(),
                 chi=chi.detach().clone(),
                 zeta=zeta.detach().clone(),
@@ -156,7 +166,7 @@ class SelfTrainedGradientDescent:
             decay = -self.cfg.step_size * self.cfg.penalty_param * self.cfg.penalty_function.gradient(w_current)
             self.prev_preactivations_ = scores[environment.I_U].detach().clone()
             self.weights = (w_current + decay + (environment.d ** 0.5 / environment.n) * (X.T @ g)).detach()
-            self.bias = (b_current + zeta).detach() if self.cfg.include_bias else b_current.new_zeros(())
+            self.bias = (b_current + zeta).detach() if self.cfg.include_bias else b_current.detach().clone()
             self.weight_history_.append(self.weights.detach().clone())
 
             if self.callback is not None:
@@ -248,7 +258,12 @@ class SelfTrainedGradientDescent:
         if initial_weights is None:
             initial_weights = torch.randn(d, dtype=torch.float64, device=X_lab.device)
         pi0 = self._pseudo_weight(0) if self.cfg.n_iterations else 0.0
-        if initial_pseudo_labels is None and pi0 > 0 and M > 0:
+        bias_pi0 = (
+            self.cfg.get_bias_pseudo_label_weight(0)
+            if self.cfg.n_iterations and self.cfg.include_bias
+            else 0.0
+        )
+        if initial_pseudo_labels is None and (pi0 > 0 or bias_pi0 > 0) and M > 0:
             raise ValueError(
                 "initial_pseudo_labels is required when the t=0 pseudo-labelled contribution is active; "
                 "use compute_pseudo_labels_from_scores explicitly for the theorem-external endogenous experiment"
@@ -273,7 +288,7 @@ class SelfTrainedGradientDescent:
         )
         init = SelfTrainingInitialization.from_unlabeled_labels(
             environment,
-            b_init=0.0 if initial_bias is None else initial_bias,
+            b_init=self.cfg.initial_bias if initial_bias is None else initial_bias,
             w_init=initial_weights,
             Y_init_unlabeled=Y_init_unl,
         )
@@ -282,12 +297,12 @@ class SelfTrainedGradientDescent:
     def decision_function(self, X: torch.Tensor) -> torch.Tensor:
         if self.weights is None or self.bias is None:
             raise RuntimeError("fit must be called before prediction")
-        return compute_scores(X, self.bias if self.cfg.include_bias else 0.0, self.weights)
+        return compute_scores(X, self.bias, self.weights)
 
     def compute_preactivation(self, X: torch.Tensor, bias: Optional[float] = None, weights: Optional[torch.Tensor] = None) -> torch.Tensor:
         if weights is None:
             return self.decision_function(X)
-        return compute_scores(X, 0.0 if (not self.cfg.include_bias) else (self.bias if bias is None else bias), weights)
+        return compute_scores(X, self.bias if bias is None else bias, weights)
 
     def predict(self, X: torch.Tensor, bias: Optional[float] = None, weights: Optional[torch.Tensor] = None) -> torch.Tensor:
         scores = self.compute_preactivation(X, bias=bias, weights=weights)

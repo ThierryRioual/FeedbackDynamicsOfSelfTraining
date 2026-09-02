@@ -8,6 +8,7 @@ import torch
 from src.asymptotics import MacroscopicStateEvolution
 from src.config import AlgorithmConfig, DataConfig
 from src.objectives import HardSelection, LogisticLoss
+from src.performance import population_error
 from src.utils import compute_abstract_pseudo_residual_from
 
 
@@ -35,6 +36,8 @@ def _algorithm_config(
     n_iterations=2,
     pseudo_label_param=0.0,
     include_bias=True,
+    bias_pseudo_label_param=None,
+    initial_bias=0.0,
     margin=1.0,
     loss_function=None,
 ):
@@ -50,6 +53,8 @@ def _algorithm_config(
         ramp_end=0,
         margin_threshold=margin,
         include_bias=include_bias,
+        initial_bias=0.0 if initial_bias is None else initial_bias,
+        bias_pseudo_label_param=bias_pseudo_label_param,
         selection_function=HardSelection(),
         **kwargs,
     )
@@ -68,6 +73,7 @@ def _make_state_evolution(
     delta=2.0,
     pseudo_label_param=0.0,
     include_bias=True,
+    bias_pseudo_label_param=None,
     initial_bias=0.0,
     initial_weight=None,
     eps_rank=1e-12,
@@ -88,6 +94,8 @@ def _make_state_evolution(
         n_iterations=n_iterations,
         pseudo_label_param=pseudo_label_param,
         include_bias=include_bias,
+        bias_pseudo_label_param=bias_pseudo_label_param,
+        initial_bias=initial_bias,
         margin=margin,
         loss_function=loss_function,
     )
@@ -143,6 +151,71 @@ def _zero_signal_nonzero_weight_sampler(size, generator, dtype, device):
         torch.zeros(size, dtype=dtype, device=device),
         torch.ones(size, dtype=dtype, device=device),
     )
+
+
+def test_oracle_bias_diagnostic_uses_score_sign_and_noise_normalization():
+    sigma, p, alignment, weight_scale = 1.3, 0.2, 0.8, 1.1
+    se = _make_state_evolution(
+        n_iterations=1,
+        scale=sigma,
+        label_prior=p,
+        initial_bias=0.25,
+    )
+    se.weight_signal_alignments[0] = torch.tensor(alignment, dtype=se.dtype)
+    se.weight_norm[0] = weight_scale
+
+    actual_error = se.compute_error(0)
+
+    expected_oracle_bias = (
+        sigma**2 * weight_scale**2 / (2.0 * alignment) * math.log(p / (1.0 - p))
+    )
+    assert se.oracle_bias[0] == pytest.approx(expected_oracle_bias)
+    assert actual_error == pytest.approx(
+        population_error(0.25, alignment, weight_scale, sigma, p)
+    )
+    assert se.oracle_error[0] == pytest.approx(
+        population_error(expected_oracle_bias, alignment, weight_scale, sigma, p)
+    )
+
+
+def test_oracle_bias_diagnostic_is_nan_at_numerically_zero_alignment():
+    se = _make_state_evolution(n_iterations=1, label_prior=0.2)
+    se.weight_signal_alignments[0] = torch.tensor(0.0, dtype=se.dtype)
+    se.weight_norm[0] = 1.0
+
+    actual_error = se.compute_error(0)
+
+    assert math.isfinite(actual_error)
+    assert math.isnan(se.oracle_bias[0])
+    assert math.isnan(se.oracle_error[0])
+
+
+def test_oracle_bias_diagnostic_does_not_feed_back_into_state_evolution():
+    with_diagnostic = _make_state_evolution(
+        K_w=29,
+        K_g=37,
+        n_iterations=3,
+        label_prior=0.2,
+        mc_seed=41,
+    )
+    without_diagnostic = _make_state_evolution(
+        K_w=29,
+        K_g=37,
+        n_iterations=3,
+        label_prior=0.2,
+        mc_seed=41,
+    )
+    without_diagnostic._compute_oracle_bias_diagnostic = lambda *_args: None
+
+    with_diagnostic.compute_trajectory()
+    without_diagnostic.compute_trajectory()
+
+    for history_name in ("bias", "weight", "preactivation", "residual"):
+        for actual, reference in zip(
+            getattr(with_diagnostic, history_name),
+            getattr(without_diagnostic, history_name),
+        ):
+            torch.testing.assert_close(actual, reference)
 
 
 class RecordingLogisticLoss(LogisticLoss):
@@ -720,12 +793,13 @@ def test_zero_selection_has_zero_pseudo_labeled_contribution():
     assert torch.isfinite(residual).all()
 
 
-def test_state_evolution_without_bias_keeps_zero_effective_intercept():
+def test_state_evolution_without_bias_keeps_configured_intercept_fixed():
     se = _make_state_evolution(
         K_w=47,
         K_g=53,
         n_iterations=3,
         include_bias=False,
+        initial_bias=0.3,
     )
 
     se.compute_trajectory()
@@ -733,13 +807,17 @@ def test_state_evolution_without_bias_keeps_zero_effective_intercept():
     assert se.algo_cfg.include_bias is False
     assert not hasattr(se, "include_bias")
     for bias in se.bias:
-        torch.testing.assert_close(bias, torch.zeros_like(bias))
+        torch.testing.assert_close(bias, torch.tensor(0.3))
         assert not bias.requires_grad
     expected_initial_preactivation = (
-        se.weight_signal_alignments[0] * se.label
+        se.bias[0]
+        + se.weight_signal_alignments[0] * se.label
         + se.sigma * se.forward_noise[0]
     )
     torch.testing.assert_close(se.preactivation[0], expected_initial_preactivation)
+    for t in range(se.T + 1):
+        expected = se.bias[t] + se.weight_signal_alignments[t] * se.label + se.sigma * se.forward_noise[t]
+        torch.testing.assert_close(se.preactivation[t], expected)
 
 
 def test_state_evolution_with_bias_uses_effective_bias_recursion():
@@ -775,12 +853,64 @@ def test_algorithm_config_is_the_only_bias_configuration():
     assert not hasattr(without_bias, "include_bias")
 
 
-def test_state_evolution_rejects_nonzero_bias_when_bias_is_disabled():
-    with pytest.raises(
-        ValueError,
-        match="initial_bias must be zero when include_bias=False",
-    ):
-        _make_state_evolution(include_bias=False, initial_bias=0.3)
+def test_state_evolution_uses_configured_initial_bias_by_default():
+    algo_cfg = _algorithm_config(include_bias=False, initial_bias=0.45)
+    se = MacroscopicStateEvolution(
+        data_cfg=_data_config(),
+        algo_cfg=algo_cfg,
+        K_w=17,
+        K_g=19,
+    )
+
+    torch.testing.assert_close(se.bias[0], torch.tensor(0.45))
+    se.step(0)
+    torch.testing.assert_close(se.bias[1], torch.tensor(0.45))
+    expected = (
+        se.bias[0]
+        + se.weight_signal_alignments[0] * se.label
+        + se.sigma * se.forward_noise[0]
+    )
+    torch.testing.assert_close(se.preactivation[0], expected)
+
+
+def test_state_evolution_bias_weight_does_not_change_the_weight_update():
+    common = dict(
+        K_w=41,
+        K_g=49,
+        n_iterations=1,
+        pseudo_label_param=1.5,
+        include_bias=True,
+        initial_bias=0.2,
+        margin=0.0,
+        sample_base_sampler=_dependent_sample_sampler,
+    )
+    default = _make_state_evolution(**common)
+    explicit = _make_state_evolution(**common, bias_pseudo_label_param=1.5)
+    labeled_only = _make_state_evolution(**common, bias_pseudo_label_param=0.0)
+
+    default.step(0)
+    explicit.step(0)
+    labeled_only.step(0)
+
+    torch.testing.assert_close(default.residual[0], explicit.residual[0])
+    torch.testing.assert_close(default.bias[1], explicit.bias[1])
+    torch.testing.assert_close(default.residual[0], labeled_only.residual[0])
+    torch.testing.assert_close(default.weight[1], labeled_only.weight[1])
+    expected_labeled_bias_residual = labeled_only.compute_pseudo_residual_from(
+        labeled_only.preactivation[0],
+        labeled_only.label,
+        labeled_only.indicator,
+        0.0,
+        labeled_only.selection_rate[0],
+        time_index=0,
+        initial_pseudo_label=labeled_only.initial_pseudo_label,
+    )
+    torch.testing.assert_close(labeled_only.bias_residual[0], expected_labeled_bias_residual)
+    torch.testing.assert_close(
+        labeled_only.bias[1],
+        labeled_only.bias[0] + expected_labeled_bias_residual.mean(),
+    )
+    assert not torch.equal(default.bias[1], labeled_only.bias[1])
 
 
 def test_state_evolution_accepts_none_initial_bias_when_bias_is_disabled():

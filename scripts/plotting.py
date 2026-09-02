@@ -39,6 +39,8 @@ def plot_experiment(
         'step_size': r'$\eta$',
         'eta': r'$\eta$',
         'pseudo_label_param': r'$\alpha$',
+        'bias_pseudo_label_param': r'$\alpha_b$',
+        'initial_bias': r'$b^0$',
         'alpha': r'$\alpha$',
         'ramp_start': r'$T_0$',
         'ramp_end': r'$T_1$',
