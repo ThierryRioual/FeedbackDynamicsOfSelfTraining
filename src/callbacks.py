@@ -134,8 +134,6 @@ class TestEvaluatorCallback:
         """
         Computes the pseudo-residual for the provided samples.
         """
-        positive_margin = learner.cfg.positive_margin
-        negative_margin = learner.cfg.negative_margin
         t_clamped = min(t, learner.cfg.n_iterations - 1)
         
         # --- FIX 2: Prevent IPW Inflation on Test Sets ---
@@ -151,17 +149,13 @@ class TestEvaluatorCallback:
             
             if self.X_unl is not None:
                 preactivations_unl = learner.compute_preactivation(self.X_unl)
-                mask = learner.cfg.selection_function(
-                    preactivations_unl, positive_margin, negative_margin
-                )
+                mask = learner.selection_mask(preactivations_unl)
                 unl_usage = mask.double().mean().item()
             else:
                 unl_usage = 0.0
             
         # Use the selector's configured forward values (hard or surrogate).
-        selection_mask = learner.cfg.selection_function(
-            preactivations, positive_margin, negative_margin
-        )
+        selection_mask = learner.selection_mask(preactivations)
         indicator = torch.tensor(indicator_val, dtype=torch.float64, device=preactivations.device)
         
         # 2. Call the shared math engine

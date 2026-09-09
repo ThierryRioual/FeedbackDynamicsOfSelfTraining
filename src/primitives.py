@@ -20,10 +20,13 @@ def pseudo_labels(t: int, scores: torch.Tensor, Y_init: torch.Tensor) -> torch.T
     return sign_with_positive_tie(scores)
 
 
-def hard_selection(scores: torch.Tensor, kappa_minus: float, kappa_plus: float) -> torch.Tensor:
+def hard_selection(scores: torch.Tensor, kappa_minus: float, kappa_plus: float,
+                   normalized_threshold: bool = False, tau=None) -> torch.Tensor:
     if not kappa_minus < 0 < kappa_plus:
         raise ValueError("require kappa_minus < 0 < kappa_plus")
-    return ((scores <= kappa_minus) | (scores >= kappa_plus)).to(dtype=scores.dtype)
+    from src.objectives import selection_mask
+
+    return selection_mask(scores, kappa_plus, kappa_minus, normalized_threshold, tau)
 
 
 def selection_rate(selection: torch.Tensor, Delta: Optional[torch.Tensor] = None) -> torch.Tensor:

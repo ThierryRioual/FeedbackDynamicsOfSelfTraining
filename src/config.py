@@ -95,6 +95,8 @@ class AlgorithmConfig:
     initial_bias: float = 0.0
     bias_pseudo_label_param: Optional[float] = None  # \pi_b; None follows \pi^t
     
+    normalized_threshold: bool = False  # Apply thresholds to r / tau (no sigma).
+
     # Internal schedule stored as a list of floats
     pseudo_label_param_schedule_: list[float] = field(init=False, default_factory=list)
 
@@ -154,6 +156,19 @@ class AlgorithmConfig:
 
         # Necessary pattern to assign fields on frozen dataclasses
         object.__setattr__(self, "pseudo_label_param_schedule_", schedule)
+
+    def selection_mask(self, scores: torch.Tensor, tau=None) -> torch.Tensor:
+        """Evaluate the configured selector, optionally on ``r / tau``.
+
+        The norm is frozen for score differentiation in state evolution.
+        Old configurations without the optional field retain raw thresholds.
+        """
+        from src.objectives import selection_mask
+
+        return selection_mask(
+            scores, self.positive_margin, self.negative_margin,
+            getattr(self, "normalized_threshold", False), tau, self.selection_function,
+        )
 
     def get_pseudo_label_weight(self, t: int) -> float:
         r"""Returns the pseudo-label weight \pi^t at iteration t."""

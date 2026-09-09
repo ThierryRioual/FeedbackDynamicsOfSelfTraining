@@ -970,11 +970,7 @@ class MacroscopicStateEvolution:
         time_index: int = 1,
         initial_pseudo_label: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        selection_mask = self.algo_cfg.selection_function(
-            preactivation,
-            self.algo_cfg.positive_margin,
-            self.algo_cfg.negative_margin,
-        )
+        selection_mask = self.selection_mask(preactivation, time_index)
         return compute_abstract_pseudo_residual_from(
             preactivation=preactivation,
             label=label,
@@ -1033,6 +1029,10 @@ class MacroscopicStateEvolution:
             ).item()
         return self.weight_norm[t]
 
+    def selection_mask(self, scores: torch.Tensor, t: int) -> torch.Tensor:
+        tau = self.compute_weight_norm(t) if getattr(self.algo_cfg, "normalized_threshold", False) else None
+        return self.algo_cfg.selection_mask(scores, tau)
+
     def compute_selection_rate(self, t: int) -> torch.Tensor:
         """Return ``mean((1-Delta) S(r)) / (1-rho)`` as specified."""
 
@@ -1041,11 +1041,7 @@ class MacroscopicStateEvolution:
         if preactivation is None or self.rho >= 1.0:
             omega = self.indicator.new_zeros(())
         else:
-            mask = self.algo_cfg.selection_function(
-                preactivation,
-                self.algo_cfg.positive_margin,
-                self.algo_cfg.negative_margin,
-            )
+            mask = self.selection_mask(preactivation, t)
             omega = torch.mean((1.0 - self.indicator) * mask) / (1.0 - self.rho)
         if not torch.isfinite(omega):
             raise FloatingPointError("selection-rate particle estimate is nonfinite")

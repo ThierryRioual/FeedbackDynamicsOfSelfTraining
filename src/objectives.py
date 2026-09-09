@@ -177,3 +177,25 @@ class SmoothSelection(SelectionFunction):
             # the backward pass.
             return hard.detach() + (soft - soft.detach())
         return soft
+
+
+def selection_mask(scores, pos_margin, neg_margin, normalized_threshold=False,
+                   tau=None, selection_function=None):
+    """Apply raw thresholds, or thresholds on r/tau with a frozen norm.
+
+    For zero or subnormal norms no examples are selected: the normalized
+    score is undefined there. This guard avoids division by zero without
+    clipping any ordinary positive norm. Sigma is deliberately absent.
+    Surrogate selectors use their existing epsilon in normalized-score units.
+    """
+    selector = HardSelection() if selection_function is None else selection_function
+    if not normalized_threshold:
+        return selector(scores, pos_margin, neg_margin)
+    if tau is None:
+        raise ValueError("normalized_threshold requires the current weight norm tau")
+    scale = torch.as_tensor(tau, dtype=scores.dtype, device=scores.device).detach()
+    if scale.numel() != 1 or not torch.isfinite(scale).all() or scale < 0:
+        raise ValueError("tau must be a finite nonnegative scalar")
+    if scale <= torch.finfo(scores.dtype).tiny:
+        return torch.zeros_like(scores)
+    return selector(scores / scale, pos_margin, neg_margin)

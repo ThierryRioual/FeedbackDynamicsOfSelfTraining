@@ -5,6 +5,9 @@ import torch
 
 from notebooks.experiment_helpers import (
     compute_error_diagnostics,
+    compute_group_residual_diagnostics,
+    compute_mechanism_diagnostics,
+    compute_temporal_error_attribution,
     finite_state_observables,
     make_algorithm_config,
     plot_error_diagnostics,
@@ -22,11 +25,28 @@ ERROR_DIAGNOSTIC_KEYS = {
     "normalized_alignment",
     "normalized_bias",
     "optimal_normalized_bias",
+    "signed_bias_tracking_error",
+    "normalized_bias_increment",
+    "optimal_normalized_bias_increment",
+    "signed_bias_tracking_error_increment",
     "optimal_linear_error",
     "alignment_regret",
     "bias_regret",
     "error_reconstructed",
+    "error_old_old",
+    "error_old_new",
+    "error_new_old",
+    "error_new_new",
     "error_increment",
+    "alignment_contribution_old_bias",
+    "alignment_contribution_new_bias",
+    "bias_contribution_old_alignment",
+    "bias_contribution_new_alignment",
+    "interaction_contribution",
+    "alignment_contribution_symmetric",
+    "bias_contribution_symmetric",
+    "alignment_contribution",
+    "bias_contribution",
     "alignment_regret_increment",
     "bias_regret_increment",
 }
@@ -39,6 +59,179 @@ def assert_error_decomposition_identities(diagnostic, error):
         diagnostic["alignment_regret_increment"]
         + diagnostic["bias_regret_increment"],
         atol=1e-14,
+    )
+    np.testing.assert_allclose(
+        diagnostic["alignment_contribution"] + diagnostic["bias_contribution"],
+        diagnostic["error_increment"],
+        atol=1e-14,
+    )
+    np.testing.assert_allclose(
+        diagnostic["alignment_contribution_new_bias"]
+        - diagnostic["alignment_contribution_old_bias"],
+        diagnostic["interaction_contribution"],
+        atol=1e-14,
+    )
+    np.testing.assert_allclose(
+        diagnostic["bias_contribution_new_alignment"]
+        - diagnostic["bias_contribution_old_alignment"],
+        diagnostic["interaction_contribution"],
+        atol=1e-14,
+    )
+    np.testing.assert_allclose(
+        diagnostic["alignment_contribution_old_bias"]
+        + diagnostic["bias_contribution_new_alignment"],
+        diagnostic["error_increment"],
+        atol=1e-14,
+    )
+    np.testing.assert_allclose(
+        diagnostic["bias_contribution_old_alignment"]
+        + diagnostic["alignment_contribution_new_bias"],
+        diagnostic["error_increment"],
+        atol=1e-14,
+    )
+    tracking_residual = diagnostic["signed_bias_tracking_error_increment"] - (
+        diagnostic["normalized_bias_increment"]
+        - diagnostic["optimal_normalized_bias_increment"]
+    )
+    np.testing.assert_allclose(
+        tracking_residual[np.isfinite(tracking_residual)], 0.0, atol=1e-14
+    )
+
+
+def test_group_residual_diagnostics_reconstruct_known_empirical_moments():
+    diagnostic = compute_group_residual_diagnostics(
+        labels=np.array([1.0, 1.0, -1.0, -1.0]),
+        indicators=np.array([1.0, 0.0, 1.0, 0.0]),
+        residuals=np.array([1.0, 2.0, 3.0, 4.0]),
+    )
+
+    assert diagnostic["zeta_plus_labeled"] == 0.25
+    assert diagnostic["zeta_plus_unlabeled"] == 0.5
+    assert diagnostic["zeta_minus_labeled"] == 0.75
+    assert diagnostic["zeta_minus_unlabeled"] == 1.0
+    assert diagnostic["zeta_reconstructed"] == diagnostic["zeta"] == 2.5
+    assert diagnostic["chi_reconstructed"] == diagnostic["chi"] == -1.0
+    assert diagnostic["zeta_reconstruction_error"] == 0.0
+    assert diagnostic["chi_reconstruction_error"] == 0.0
+
+
+def test_temporal_error_attribution_is_exact_and_has_one_value_per_transition():
+    attribution = compute_temporal_error_attribution(
+        normalized_bias=np.array([-0.3, 0.2, 0.4, -0.1]),
+        normalized_alignment=np.array([0.2, 0.7, 0.5, 1.1]),
+        p=0.3,
+        sigma=1.2,
+    )
+
+    assert set(attribution) == {
+        "error_old_old",
+        "error_old_new",
+        "error_new_old",
+        "error_new_new",
+        "alignment_contribution",
+        "bias_contribution",
+        "error_increment",
+        "alignment_contribution_old_bias",
+        "alignment_contribution_new_bias",
+        "bias_contribution_old_alignment",
+        "bias_contribution_new_alignment",
+        "interaction_contribution",
+        "alignment_contribution_symmetric",
+        "bias_contribution_symmetric",
+    }
+    for values in attribution.values():
+        assert values.shape == (3,)
+    np.testing.assert_allclose(
+        attribution["alignment_contribution"] + attribution["bias_contribution"],
+        attribution["error_increment"],
+        atol=1e-14,
+    )
+    np.testing.assert_allclose(
+        attribution["alignment_contribution"],
+        attribution["alignment_contribution_symmetric"],
+    )
+    np.testing.assert_allclose(
+        attribution["bias_contribution"], attribution["bias_contribution_symmetric"]
+    )
+
+
+def test_temporal_error_attribution_vanishes_for_a_constant_trajectory():
+    attribution = compute_temporal_error_attribution(
+        normalized_bias=np.full(4, 0.2),
+        normalized_alignment=np.full(4, 0.7),
+        p=0.2,
+        sigma=1.0,
+    )
+
+    for key in (
+        "error_increment",
+        "alignment_contribution_old_bias",
+        "alignment_contribution_new_bias",
+        "bias_contribution_old_alignment",
+        "bias_contribution_new_alignment",
+        "interaction_contribution",
+        "alignment_contribution_symmetric",
+        "bias_contribution_symmetric",
+        "alignment_contribution",
+        "bias_contribution",
+    ):
+        np.testing.assert_allclose(attribution[key], 0.0, atol=1e-15)
+
+
+def test_temporal_error_attribution_has_zero_interaction_for_a_separable_error():
+    attribution = compute_temporal_error_attribution(
+        normalized_bias=np.array([-0.4, 0.1, 0.6]),
+        normalized_alignment=np.array([0.2, 0.9, -0.3]),
+        p=0.5,
+        sigma=1.0,
+        error_evaluator=lambda bias, alignment: bias**2 + 2.0 * alignment**2,
+    )
+
+    np.testing.assert_allclose(attribution["interaction_contribution"], 0.0, atol=1e-14)
+    np.testing.assert_allclose(
+        attribution["alignment_contribution_old_bias"],
+        attribution["alignment_contribution_new_bias"],
+    )
+    np.testing.assert_allclose(
+        attribution["bias_contribution_old_alignment"],
+        attribution["bias_contribution_new_alignment"],
+    )
+
+
+def test_temporal_error_attribution_preserves_identities_with_interaction():
+    normalized_bias = np.array([-0.4, 0.1, 0.6])
+    normalized_alignment = np.array([0.2, 0.9, -0.3])
+    attribution = compute_temporal_error_attribution(
+        normalized_bias=normalized_bias,
+        normalized_alignment=normalized_alignment,
+        p=0.5,
+        sigma=1.0,
+        error_evaluator=lambda bias, alignment: bias**2 + 2.0 * alignment**2 + bias * alignment,
+    )
+
+    expected_interaction = np.diff(normalized_bias) * np.diff(normalized_alignment)
+    np.testing.assert_allclose(
+        attribution["interaction_contribution"], expected_interaction
+    )
+    np.testing.assert_allclose(
+        attribution["alignment_contribution_new_bias"]
+        - attribution["alignment_contribution_old_bias"],
+        attribution["interaction_contribution"],
+    )
+    np.testing.assert_allclose(
+        attribution["bias_contribution_new_alignment"]
+        - attribution["bias_contribution_old_alignment"],
+        attribution["interaction_contribution"],
+    )
+    np.testing.assert_allclose(
+        attribution["alignment_contribution_old_bias"]
+        + attribution["bias_contribution_new_alignment"],
+        attribution["error_increment"],
+    )
+    np.testing.assert_allclose(
+        attribution["bias_contribution_old_alignment"]
+        + attribution["alignment_contribution_new_bias"],
+        attribution["error_increment"],
     )
 
 
@@ -77,8 +270,33 @@ def test_balanced_zero_bias_error_diagnostics_reconstruct_and_decompose_error():
         atol=1e-15,
     )
     fig, axes = plot_error_diagnostics(diagnostic, show=False)
-    assert [len(ax.lines) for ax in axes.flat] == [1, 2, 3]
+    assert [len(ax.lines) for ax in axes.flat] == [1, 2, 3, 5]
     fig.clear()
+
+
+def test_bias_tracking_accepts_roundoff_when_optimal_bias_is_large():
+    bias = np.array([0.2, 0.3])
+    alignment = np.array([0.0005, 0.0006])
+    optimal_bias = np.log(0.2 / 0.8) / (2 * alignment)
+    residual = np.diff(bias - optimal_bias) - (
+        np.diff(bias) - np.diff(optimal_bias)
+    )
+    # This valid trajectory failed the previous fixed absolute tolerance.
+    assert np.max(np.abs(residual)) > 1e-14
+    diagnostic = compute_error_diagnostics(
+        {"normalized_bias": bias, "normalized_alignment": alignment},
+        p=0.2, sigma=1.0, s_mu=1.0,
+    )
+    np.testing.assert_allclose(
+        diagnostic["signed_bias_tracking_error_increment"],
+        np.diff(bias - optimal_bias),
+        rtol=1e-14, atol=1e-14,
+    )
+    expected_error = np.array([
+        population_error(b, m, 1.0, 1.0, 0.2)
+        for b, m in zip(bias, alignment)
+    ])
+    np.testing.assert_allclose(diagnostic["error_reconstructed"], expected_error)
 
 
 def test_error_diagnostics_normalized_fallback_and_imbalanced_zero_handling():
@@ -92,9 +310,10 @@ def test_error_diagnostics_normalized_fallback_and_imbalanced_zero_handling():
         s_mu=1.0,
     )
 
-    assert np.isnan(diagnostic["optimal_normalized_bias"][:2]).all()
-    assert np.isfinite(diagnostic["optimal_normalized_bias"][2])
-    assert np.isnan(diagnostic["alignment_regret"][:2]).all()
+    assert np.isneginf(diagnostic["optimal_normalized_bias"][0])
+    assert np.isfinite(diagnostic["optimal_normalized_bias"][1:]).all()
+    assert np.isfinite(diagnostic["alignment_regret"]).all()
+    assert np.isnan(diagnostic["signed_bias_tracking_error"][:2]).all()
     assert np.isfinite(diagnostic["optimal_linear_error"]).all()
     np.testing.assert_array_equal(
         diagnostic["normalized_alignment"], np.array([0.0, 1e-12, 0.5])
@@ -110,6 +329,47 @@ def test_error_diagnostics_normalized_fallback_and_imbalanced_zero_handling():
         s_mu=0.0,
     )
     np.testing.assert_array_equal(balanced["optimal_normalized_bias"], [0.0])
+
+
+def test_nonpositive_alignment_uses_majority_prediction_infimum():
+    alignment = np.array([-0.6, 0.0, 0.4, -0.2])
+    bias = np.array([0.3, -0.4, 0.2, 0.1])
+    for p in (0.2, 0.5, 0.8):
+        with np.errstate(invalid="raise"):
+            diagnostic = compute_error_diagnostics(
+                {"normalized_alignment": alignment, "normalized_bias": bias},
+                p=p, sigma=1.0, s_mu=1.0,
+            )
+        optimum = diagnostic["optimal_normalized_bias"]
+        expected_limit = -np.inf if p <= 0.5 else np.inf
+        np.testing.assert_array_equal(optimum[[0, 3]], expected_limit)
+        assert optimum[1] == (0.0 if p == 0.5 else expected_limit)
+        optimized_error = (diagnostic["optimal_linear_error"]
+                           + diagnostic["alignment_regret"])
+        np.testing.assert_allclose(optimized_error[[0, 1, 3]], min(p, 1-p))
+        direct = np.array([population_error(b, a, 1., 1., p)
+                           for b, a in zip(bias, alignment)])
+        np.testing.assert_allclose(diagnostic["error_reconstructed"], direct)
+        np.testing.assert_allclose(
+            diagnostic["alignment_regret_increment"]
+            + diagnostic["bias_regret_increment"], np.diff(direct), atol=1e-14,
+        )
+        assert np.all(diagnostic["alignment_regret"] >= -1e-14)
+        assert np.all(diagnostic["bias_regret"] >= -1e-14)
+        assert np.isnan(diagnostic["signed_bias_tracking_error"][[0, 3]]).all()
+        # Every tested finite intercept is worse than the limiting optimum.
+        for b in np.linspace(-8, 8, 101):
+            assert population_error(b, -0.6, 1., 1., p) >= min(p, 1-p) - 1e-14
+
+
+def test_zero_signal_bayes_error_is_majority_error():
+    for p in (0.2, 0.5, 0.8):
+        diagnostic = compute_error_diagnostics(
+            {"normalized_alignment": [0.0], "normalized_bias": [0.3]},
+            p=p, sigma=1., s_mu=0.,
+        )
+        np.testing.assert_allclose(diagnostic["optimal_linear_error"], min(p, 1-p))
+        np.testing.assert_allclose(diagnostic["alignment_regret"], 0.)
 
 
 def test_run_experiment_records_finite_minimum_population_error():
@@ -198,6 +458,24 @@ def test_run_experiment_records_state_evolution_minimum_population_error():
     assert_error_decomposition_identities(
         run.error_diagnostics["state_evolution"], error
     )
+    for source in ("finite", "state_evolution"):
+        mechanism = compute_mechanism_diagnostics(run, source=source)
+        assert mechanism["signed_bias_tracking_error"].shape == (4,)
+        assert mechanism["zeta"].shape == (3,)
+        assert mechanism["selection_rate_true_plus"].shape == (3,)
+        assert mechanism["orthogonal_weight_energy"].shape == (4,)
+        np.testing.assert_allclose(
+            mechanism["zeta_reconstruction_error"], 0.0, atol=1e-14
+        )
+        np.testing.assert_allclose(
+            mechanism["chi_reconstruction_error"], 0.0, atol=1e-14
+        )
+        geometry_error = mechanism[
+            "normalized_alignment_geometry_reconstruction_error"
+        ]
+        np.testing.assert_allclose(
+            geometry_error[np.isfinite(geometry_error)], 0.0, atol=1e-12
+        )
 
 
 def test_state_evolution_oracle_bias_observables_and_plot_are_available():

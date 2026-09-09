@@ -68,6 +68,12 @@ class SelfTrainedGradientDescent:
             raise ValueError("finite self-training requires at least one labelled observation")
         return X
 
+    def selection_mask(self, scores: torch.Tensor) -> torch.Tensor:
+        tau = None
+        if getattr(self.cfg, "normalized_threshold", False):
+            tau = torch.linalg.vector_norm(self.weights) / self.weights.numel() ** 0.5
+        return self.cfg.selection_mask(scores, tau)
+
     def _pseudo_weight(self, t: int) -> float:
         return self.cfg.get_pseudo_label_weight(t)
 
@@ -108,7 +114,7 @@ class SelfTrainedGradientDescent:
             w_current = self.weights
             scores = compute_scores(X, b_current, w_current)
             Yhat = pseudo_labels(t, scores, init.Y_init)
-            selection = self.cfg.selection_function(scores, self.cfg.positive_margin, self.cfg.negative_margin)
+            selection = self.selection_mask(scores)
             # Labeled selection is irrelevant, but setting it to zero makes the
             # stored weights exactly the finite manuscript convention.
             selection = selection * (1.0 - environment.Delta)

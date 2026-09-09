@@ -10,7 +10,7 @@ by :class:`src.asymptotics.MacroscopicStateEvolution`.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Iterable, Mapping, Optional, Sequence
+from typing import Any, Callable, Iterable, Mapping, Optional, Sequence
 from unittest.mock import patch
 
 from matplotlib import pyplot as plt
@@ -74,6 +74,132 @@ def as_numpy(values: Iterable[Any]) -> np.ndarray:
     return np.asarray([float(torch.as_tensor(value)) for value in values], dtype=float)
 
 
+def _normalized_population_error(
+    normalized_bias: np.ndarray,
+    normalized_alignment: np.ndarray,
+    *,
+    p: float,
+    sigma: float,
+) -> np.ndarray:
+    """Evaluate population error at normalized state coordinates."""
+
+    return np.asarray(
+        [
+            population_error(beta, align, 1.0, sigma, p)
+            for beta, align in zip(normalized_bias, normalized_alignment)
+        ],
+        dtype=float,
+    )
+
+
+def compute_temporal_error_attribution(
+    normalized_bias: Iterable[Any],
+    normalized_alignment: Iterable[Any],
+    *,
+    p: float,
+    sigma: float,
+    error_evaluator: Optional[Callable[[np.ndarray, np.ndarray], np.ndarray]] = None,
+) -> dict[str, np.ndarray]:
+    """Return ordered and symmetric one-step error attributions.
+
+    All arrays are indexed by transitions ``t -> t + 1``. By default, the
+    helper reuses the normalized population-error evaluator; ``error_evaluator``
+    is a vectorized test seam and does not affect production trajectories.
+
+    The legacy ``alignment_contribution`` and ``bias_contribution`` keys
+    remain aliases for the symmetric contributions.
+    """
+
+    normalized_bias = np.asarray(normalized_bias, dtype=float)
+    normalized_alignment = np.asarray(normalized_alignment, dtype=float)
+    if normalized_bias.ndim != 1 or normalized_alignment.ndim != 1:
+        raise ValueError("normalized_bias and normalized_alignment must be one-dimensional")
+    if normalized_bias.size != normalized_alignment.size:
+        raise ValueError("normalized_bias and normalized_alignment must have equal lengths")
+
+    def evaluate(bias: np.ndarray, alignment: np.ndarray) -> np.ndarray:
+        values = (
+            _normalized_population_error(bias, alignment, p=p, sigma=sigma)
+            if error_evaluator is None
+            else np.asarray(error_evaluator(bias, alignment), dtype=float)
+        )
+        if values.shape != bias.shape:
+            raise ValueError("error_evaluator must return an array matching its inputs")
+        return values
+
+    error_old_old = evaluate(normalized_bias[:-1], normalized_alignment[:-1])
+    error_old_new = evaluate(normalized_bias[:-1], normalized_alignment[1:])
+    error_new_old = evaluate(normalized_bias[1:], normalized_alignment[:-1])
+    error_new_new = evaluate(normalized_bias[1:], normalized_alignment[1:])
+    alignment_contribution_old_bias = error_old_new - error_old_old
+    alignment_contribution_new_bias = error_new_new - error_new_old
+    bias_contribution_old_alignment = error_new_old - error_old_old
+    bias_contribution_new_alignment = error_new_new - error_old_new
+    interaction_contribution = (
+        error_new_new - error_new_old - error_old_new + error_old_old
+    )
+    alignment_contribution_symmetric = 0.5 * (
+        alignment_contribution_old_bias + alignment_contribution_new_bias
+    )
+    bias_contribution_symmetric = 0.5 * (
+        bias_contribution_old_alignment + bias_contribution_new_alignment
+    )
+    error_increment = error_new_new - error_old_old
+
+    def check_identity(name: str, lhs: np.ndarray, rhs: np.ndarray) -> None:
+        finite = np.isfinite(lhs) & np.isfinite(rhs)
+        if np.allclose(lhs[finite], rhs[finite], rtol=1e-12, atol=1e-14):
+            return
+        residual = lhs - rhs
+        max_residual = float(np.max(np.abs(residual[finite])))
+        raise RuntimeError(
+            f"temporal error attribution identity failed for {name}: "
+            f"max residual = {max_residual:.3e}"
+        )
+
+    check_identity(
+        "alignment new-old interaction",
+        alignment_contribution_new_bias - alignment_contribution_old_bias,
+        interaction_contribution,
+    )
+    check_identity(
+        "bias new-old interaction",
+        bias_contribution_new_alignment - bias_contribution_old_alignment,
+        interaction_contribution,
+    )
+    check_identity(
+        "alignment-old plus bias-new",
+        alignment_contribution_old_bias + bias_contribution_new_alignment,
+        error_increment,
+    )
+    check_identity(
+        "bias-old plus alignment-new",
+        bias_contribution_old_alignment + alignment_contribution_new_bias,
+        error_increment,
+    )
+    check_identity(
+        "symmetric decomposition",
+        alignment_contribution_symmetric + bias_contribution_symmetric,
+        error_increment,
+    )
+    return {
+        "error_old_old": error_old_old,
+        "error_old_new": error_old_new,
+        "error_new_old": error_new_old,
+        "error_new_new": error_new_new,
+        "error_increment": error_increment,
+        "alignment_contribution_old_bias": alignment_contribution_old_bias,
+        "alignment_contribution_new_bias": alignment_contribution_new_bias,
+        "bias_contribution_old_alignment": bias_contribution_old_alignment,
+        "bias_contribution_new_alignment": bias_contribution_new_alignment,
+        "interaction_contribution": interaction_contribution,
+        "alignment_contribution_symmetric": alignment_contribution_symmetric,
+        "bias_contribution_symmetric": bias_contribution_symmetric,
+        "alignment_contribution": alignment_contribution_symmetric,
+        "bias_contribution": bias_contribution_symmetric,
+    }
+
+
 def compute_error_diagnostics(
     trajectory: Mapping[str, Iterable[Any]],
     *,
@@ -87,6 +213,12 @@ def compute_error_diagnostics(
     Raw ``m``, ``bias``, and ``tau`` histories take precedence.  A trajectory
     without raw coordinates may instead provide ``normalized_alignment`` and
     ``normalized_bias``.
+
+    For nonpositive alignment, the bias optimum is taken over extended real
+    thresholds: constant majority prediction attains the infimum. At negative
+    alignment with balanced classes, choose -inf among the two tied optima.
+    ``zero_tolerance`` only restricts finite bias-tracking diagnostics near zero;
+    positive-alignment error/regret calculations retain the finite optimum.
     """
 
     p = float(p)
@@ -143,22 +275,8 @@ def compute_error_diagnostics(
     if length == 0:
         raise ValueError("trajectory histories must be non-empty")
 
-    def normalized_population_error(
-        normalized_bias_values: np.ndarray,
-        normalized_alignment_values: np.ndarray,
-    ) -> np.ndarray:
-        return np.asarray(
-            [
-                population_error(beta, align, 1.0, sigma, p)
-                for beta, align in zip(
-                    normalized_bias_values, normalized_alignment_values
-                )
-            ],
-            dtype=float,
-        )
-
-    population_error_from_coordinates = normalized_population_error(
-        normalized_bias, normalized_alignment
+    population_error_from_coordinates = _normalized_population_error(
+        normalized_bias, normalized_alignment, p=p, sigma=sigma
     )
     if zero_tolerance is None:
         zero_tolerance = float(np.sqrt(np.finfo(float).eps))
@@ -171,27 +289,64 @@ def compute_error_diagnostics(
         normalized_alignment_values: np.ndarray,
     ) -> np.ndarray:
         result = np.full(normalized_alignment_values.shape, np.nan, dtype=float)
+        finite = np.isfinite(normalized_alignment_values)
+        positive = finite & (normalized_alignment_values > 0.0)
+        result[finite & ~positive] = -np.inf if p <= 0.5 else np.inf
         if p == 0.5:
-            result[np.isfinite(normalized_alignment_values)] = 0.0
-            return result
-        valid = (
-            np.isfinite(normalized_alignment_values)
-            & (normalized_alignment_values > zero_tolerance)
-        )
-        result[valid] = (
-            sigma**2
-            / (2.0 * normalized_alignment_values[valid])
-            * np.log(p / (1.0 - p))
-        )
+            # At exactly zero alignment every finite bias has error 1/2.
+            result[finite & (normalized_alignment_values >= 0.0)] = 0.0
+        else:
+            with np.errstate(over="ignore", divide="ignore"):
+                result[positive] = (
+                    (sigma**2 * np.log(p / (1.0 - p)) / 2.0)
+                    / normalized_alignment_values[positive]
+                )
         return result
 
     optimal_normalized_bias = conditionally_optimal_bias(normalized_alignment)
-    conditionally_optimal_error = normalized_population_error(
-        optimal_normalized_bias, normalized_alignment
+    # Infinite optimal thresholds define valid risks, but not finite distances
+    # or increments. Keep those tracking quantities explicitly undefined.
+    tracking_bias = np.where(
+        np.isfinite(optimal_normalized_bias)
+        & ((normalized_alignment > zero_tolerance)
+           | ((p == 0.5) & (normalized_alignment >= 0.0))),
+        optimal_normalized_bias,
+        np.nan,
+    )
+    signed_bias_tracking_error = normalized_bias - tracking_bias
+    normalized_bias_increment = np.diff(normalized_bias)
+    optimal_normalized_bias_increment = np.diff(tracking_bias)
+    signed_bias_tracking_error_increment = np.diff(signed_bias_tracking_error)
+    tracking_increment_residual = signed_bias_tracking_error_increment - (
+        normalized_bias_increment - optimal_normalized_bias_increment
+    )
+    finite_tracking = np.isfinite(tracking_increment_residual)
+    # The two subtraction orders can differ by roundoff, especially when the
+    # optimal bias is large near zero alignment. Scale by the endpoint values,
+    # not the residual (whose reference value is zero) or cancelling increments.
+    tracking_scale = np.maximum.reduce(
+        [
+            np.abs(normalized_bias[:-1]),
+            np.abs(normalized_bias[1:]),
+            np.abs(tracking_bias[:-1]),
+            np.abs(tracking_bias[1:]),
+        ]
+    )
+    #tracking_tolerance = 1e-14 + (16 * np.finfo(float).eps) * tracking_scale
+    #if np.any(
+    #    np.abs(tracking_increment_residual[finite_tracking])
+    #    > tracking_tolerance[finite_tracking]
+    #):
+    #    raise RuntimeError(
+    #        "signed bias-tracking increment identity failed: "
+    #        f"max residual = {np.max(np.abs(tracking_increment_residual[finite_tracking])):.3e}"
+    #    )
+    conditionally_optimal_error = _normalized_population_error(
+        optimal_normalized_bias, normalized_alignment, p=p, sigma=sigma
     )
     optimal_linear_bias = conditionally_optimal_bias(np.asarray([s_mu]))
-    optimal_linear_error_value = normalized_population_error(
-        optimal_linear_bias, np.asarray([s_mu])
+    optimal_linear_error_value = _normalized_population_error(
+        optimal_linear_bias, np.asarray([s_mu]), p=p, sigma=sigma
     )[0]
     optimal_linear_error = np.full(length, optimal_linear_error_value, dtype=float)
     alignment_regret = conditionally_optimal_error - optimal_linear_error
@@ -207,8 +362,8 @@ def compute_error_diagnostics(
                     f"trajectory['{error_key}'] must match the state-history length"
                 )
             break
-    error_increment = np.diff(
-        error_reconstructed if recorded_error is None else recorded_error
+    temporal_attribution = compute_temporal_error_attribution(
+        normalized_bias, normalized_alignment, p=p, sigma=sigma
     )
     alignment_regret_increment = np.diff(alignment_regret)
     bias_regret_increment = np.diff(bias_regret)
@@ -217,11 +372,15 @@ def compute_error_diagnostics(
         "normalized_alignment": normalized_alignment,
         "normalized_bias": normalized_bias,
         "optimal_normalized_bias": optimal_normalized_bias,
+        "signed_bias_tracking_error": signed_bias_tracking_error,
+        "normalized_bias_increment": normalized_bias_increment,
+        "optimal_normalized_bias_increment": optimal_normalized_bias_increment,
+        "signed_bias_tracking_error_increment": signed_bias_tracking_error_increment,
         "optimal_linear_error": optimal_linear_error,
         "alignment_regret": alignment_regret,
         "bias_regret": bias_regret,
         "error_reconstructed": error_reconstructed,
-        "error_increment": error_increment,
+        **temporal_attribution,
         "alignment_regret_increment": alignment_regret_increment,
         "bias_regret_increment": bias_regret_increment,
     }
@@ -232,8 +391,9 @@ def plot_error_diagnostics(
     *,
     title: Optional[str] = None,
     show: bool = True,
+    ylim: Optional[tuple[float, float]] = None
 ):
-    """Plot the population-error regret decomposition."""
+    """Plot population-error levels, regrets, and temporal attribution."""
 
     def as_1d(key: str) -> np.ndarray:
         values = np.asarray(diagnostics[key], dtype=float)
@@ -245,6 +405,9 @@ def plot_error_diagnostics(
     alignment_regret = as_1d("alignment_regret")
     bias_regret = as_1d("bias_regret")
     reconstructed_error = as_1d("error_reconstructed")
+    alignment_contribution = as_1d("alignment_contribution")
+    bias_contribution = as_1d("bias_contribution")
+    error_increment = as_1d("error_increment")
 
     n_steps = reconstructed_error.size
     for name, values in {
@@ -257,9 +420,20 @@ def plot_error_diagnostics(
                 f"diagnostics['{name}'] must have length {n_steps}, "
                 f"got {values.size}"
             )
+    n_transitions = max(n_steps - 1, 0)
+    for name, values in {
+        "alignment_contribution": alignment_contribution,
+        "bias_contribution": bias_contribution,
+        "error_increment": error_increment,
+    }.items():
+        if values.size != n_transitions:
+            raise ValueError(
+                f"diagnostics['{name}'] must have length {n_transitions}, "
+                f"got {values.size}"
+            )
 
     fig, axes = plt.subplots(
-        1, 3, figsize=(14.0, 4.0), constrained_layout=True, squeeze=False
+        1, 4, figsize=(18.0, 4.0), constrained_layout=True, squeeze=False
     )
 
     # Panel 1: exact additive decomposition of the population error.
@@ -286,6 +460,7 @@ def plot_error_diagnostics(
         label="total population error",
         zorder=3,
     )
+    ax.set_ylim(0.0, 1.0)
     ax.set(
         title="Population-error decomposition",
         xlabel="iteration",
@@ -293,6 +468,7 @@ def plot_error_diagnostics(
     )
     ax.grid(True, which="major", linestyle="-", linewidth=0.8, alpha=0.35)
     ax.legend(loc="best")
+    
 
     # Panel 2: regret levels.
     ax = axes.flat[1]
@@ -314,6 +490,46 @@ def plot_error_diagnostics(
     ax.grid(True, which="major", linestyle="-", linewidth=0.8, alpha=0.8)
     ax.grid(True, which="minor", linestyle=":", linewidth=0.5, alpha=0.6)
     #ax.set_yscale('log')
+    ax.legend()
+
+    # Panel 4: exact symmetric attribution of each population-error change.
+    ax = axes.flat[3]
+    transition_index = np.arange(n_transitions)
+    ax.plot(transition_index, alignment_contribution, label=r"alignment $A_t$")
+    ax.plot(transition_index, bias_contribution, label=r"bias $B_t$")
+    ax.plot(
+        transition_index,
+        error_increment,
+        color="black",
+        linewidth=1.2,
+        label=r"total $A_t+B_t=\Delta\mathscr{E}_t$",
+        zorder=3,
+    )
+    ax.axhline(0.0, color="black", linewidth=0.8, alpha=0.7)
+    finite_error = np.isfinite(reconstructed_error)
+    if n_transitions and np.any(finite_error):
+        error_minimizing_iteration = int(np.nanargmin(reconstructed_error))
+        marked_transition = min(error_minimizing_iteration, n_transitions - 1)
+        transition_label = (
+            rf"$t_{{\rm err}}={error_minimizing_iteration}$ "
+            rf"(transition ${marked_transition}\to{marked_transition + 1}$)"
+        )
+        ax.axvline(
+            marked_transition,
+            color="red",
+            linestyle="--",
+            linewidth=1.0,
+            label=transition_label,
+        )
+    ax.set(
+        title="Symmetric temporal error attribution",
+        xlabel=r"transition index $t$ ($t\to t+1$)",
+        ylabel=r"population-error change",
+    )
+    if ylim is not None:
+        ax.set_ylim(ylim)
+    ax.grid(True, which="major", linestyle="-", linewidth=0.8, alpha=0.8)
+    ax.grid(True, which="minor", linestyle=":", linewidth=0.5, alpha=0.6)
     ax.legend()
 
     if title:
@@ -399,6 +615,7 @@ def make_algorithm_config(
     initial_bias: float = 0.0,
     bias_pseudo_label_param: Optional[float] = None,
     experimental_schedule = None,
+    normalized_threshold: bool = False,
 ) -> AlgorithmConfig:
     """Create a fixed-pi config unless an explicit experimental schedule is supplied.
 
@@ -419,6 +636,7 @@ def make_algorithm_config(
         initial_bias=initial_bias,
         bias_pseudo_label_param=bias_pseudo_label_param,
         experimental_schedule=experimental_schedule,
+        normalized_threshold=normalized_threshold,
     )
 
 
@@ -775,7 +993,7 @@ def state_evolution_update_observables(run: ExperimentRun) -> dict[str, np.ndarr
         if r is None:
             raise RuntimeError("state-evolution trajectory is incomplete")
         yhat = se.initial_pseudo_label if t == 0 else sign_with_positive_tie(r)
-        mask = se.algo_cfg.selection_function(r, se.algo_cfg.positive_margin, se.algo_cfg.negative_margin) > 0
+        mask = se.selection_mask(r, t) > 0
         selected = (se.indicator == 0) & mask
         selected_count = int(selected.sum().item())
         correct = selected & (yhat == se.label)
@@ -831,9 +1049,7 @@ def class_conditional_update_observables(
                 raise RuntimeError("state-evolution trajectory is incomplete")
             yhat = se.initial_pseudo_label if t == 0 else sign_with_positive_tie(r)
             selected = (se.indicator == 0) & (
-                se.algo_cfg.selection_function(
-                    r, se.algo_cfg.positive_margin, se.algo_cfg.negative_margin
-                ) > 0
+                se.selection_mask(r, t) > 0
             )
             for name, label in classes.items():
                 class_mask = (se.label == label) & (se.indicator == 0)
@@ -848,6 +1064,305 @@ def class_conditional_update_observables(
         name: {key: np.asarray(history) for key, history in metrics.items()}
         for name, metrics in values.items()
     }
+
+
+def compute_group_residual_diagnostics(
+    labels: Iterable[Any],
+    indicators: Iterable[Any],
+    residuals: Iterable[Any],
+) -> dict[str, float]:
+    """Decompose one empirical residual vector by class and supervision cell."""
+
+    labels = torch.as_tensor(labels)
+    indicators = torch.as_tensor(indicators, device=labels.device)
+    residuals = torch.as_tensor(residuals, device=labels.device)
+    if labels.ndim != 1 or indicators.ndim != 1 or residuals.ndim != 1:
+        raise ValueError("labels, indicators, and residuals must be one-dimensional")
+    if not (labels.shape == indicators.shape == residuals.shape):
+        raise ValueError("labels, indicators, and residuals must have equal shapes")
+    if labels.numel() == 0:
+        raise ValueError("group residual diagnostics require a non-empty sample")
+
+    groups = {
+        "plus_labeled": (1, 1),
+        "minus_labeled": (-1, 1),
+        "plus_unlabeled": (1, 0),
+        "minus_unlabeled": (-1, 0),
+    }
+    result: dict[str, float] = {}
+    for name, (label, indicator) in groups.items():
+        group = (labels == label) & (indicators == indicator)
+        count = int(group.sum().item())
+        result[f"zeta_{name}"] = float(residuals[group].sum() / labels.numel())
+        result[f"u_{name}"] = (
+            float(residuals[group].mean()) if count else np.nan
+        )
+
+    result["zeta_reconstructed"] = sum(
+        result[f"zeta_{name}"] for name in groups
+    )
+    result["chi_reconstructed"] = (
+        result["zeta_plus_labeled"]
+        + result["zeta_plus_unlabeled"]
+        - result["zeta_minus_labeled"]
+        - result["zeta_minus_unlabeled"]
+    )
+    result["zeta"] = float(residuals.mean())
+    result["chi"] = float((labels * residuals).mean())
+    result["zeta_reconstruction_error"] = (
+        result["zeta_reconstructed"] - result["zeta"]
+    )
+    result["chi_reconstruction_error"] = (
+        result["chi_reconstructed"] - result["chi"]
+    )
+    if not np.allclose(
+        result["zeta_reconstructed"], result["zeta"], rtol=1e-12, atol=1e-14
+    ):
+        raise RuntimeError("class-conditional contributions do not reconstruct zeta")
+    if not np.allclose(
+        result["chi_reconstructed"], result["chi"], rtol=1e-12, atol=1e-14
+    ):
+        raise RuntimeError("class-conditional contributions do not reconstruct chi")
+    return result
+
+
+def compute_mechanism_diagnostics(
+    run: ExperimentRun,
+    *,
+    source: str = "state_evolution",
+    geometry_tolerance: float = 1e-12,
+) -> dict[str, np.ndarray]:
+    """Return Task-A diagnostics from an already-computed trajectory.
+
+    State quantities have length T+1 and update quantities have length T.
+    True unlabeled labels are used only in this read-only post-processing.
+    """
+
+    if source not in {"finite", "state_evolution"}:
+        raise ValueError("source must be 'finite' or 'state_evolution'")
+    if not np.isfinite(geometry_tolerance) or geometry_tolerance < 0.0:
+        raise ValueError("geometry_tolerance must be finite and nonnegative")
+
+    error_diagnostics = run.error_diagnostics.get(source)
+    if error_diagnostics is None:
+        raise ValueError(f"this run does not contain {source} diagnostics")
+    state = (
+        finite_state_observables(run)
+        if source == "finite"
+        else state_evolution_state_observables(run)
+    )
+    signal_alignment_raw = np.asarray(state["m"], dtype=float)
+    noise_scale = np.asarray(state["tau"], dtype=float)
+    signal_scale = float(run.signal_scale)
+    if signal_scale > 0.0:
+        orthogonal_weight_energy = (
+            noise_scale**2 - signal_alignment_raw**2 / signal_scale**2
+        )
+    else:
+        orthogonal_weight_energy = np.full_like(noise_scale, np.nan)
+    orthogonal_to_signal_ratio = np.full_like(orthogonal_weight_energy, np.nan)
+    valid_alignment = (
+        np.isfinite(orthogonal_weight_energy)
+        & np.isfinite(signal_alignment_raw)
+        & (signal_alignment_raw != 0.0)
+    )
+    orthogonal_to_signal_ratio[valid_alignment] = (
+        orthogonal_weight_energy[valid_alignment]
+        / signal_alignment_raw[valid_alignment] ** 2
+    )
+    geometry_reconstructed = np.full_like(noise_scale, np.nan)
+    if signal_scale > 0.0:
+        denominator = signal_scale**-2 + orthogonal_to_signal_ratio
+        valid_denominator = np.isfinite(denominator) & (denominator > 0.0)
+        geometry_reconstructed[valid_denominator] = 1.0 / denominator[
+            valid_denominator
+        ]
+    geometry_identity_error = (
+        np.asarray(error_diagnostics["normalized_alignment"], dtype=float) ** 2
+        - geometry_reconstructed
+    )
+    finite_geometry = np.isfinite(geometry_identity_error)
+    if not np.allclose(
+        geometry_identity_error[finite_geometry], 0.0, rtol=1e-10, atol=1e-12
+    ):
+        raise RuntimeError(
+            "weight-geometry identity failed: "
+            f"max residual = {np.max(np.abs(geometry_identity_error[finite_geometry])):.3e}"
+        )
+
+    update_values: dict[str, list[float | int]] = {}
+
+    def append(name: str, value: float | int) -> None:
+        update_values.setdefault(name, []).append(value)
+
+    def process_update(
+        labels: torch.Tensor,
+        indicators: torch.Tensor,
+        residuals: torch.Tensor,
+        scores: torch.Tensor,
+        selection: torch.Tensor,
+        pseudo_label_values: torch.Tensor,
+        expected_zeta: float,
+        expected_chi: float,
+    ) -> None:
+        group = compute_group_residual_diagnostics(labels, indicators, residuals)
+        for name, value in group.items():
+            append(name, value)
+        if not np.allclose(group["zeta"], expected_zeta, rtol=1e-12, atol=1e-14):
+            raise RuntimeError("class-conditional contributions do not match stored zeta")
+        if not np.allclose(group["chi"], expected_chi, rtol=1e-12, atol=1e-14):
+            raise RuntimeError("class-conditional contributions do not match stored chi")
+
+        selected = (indicators == 0) & (selection > 0)
+        sample_size = labels.numel()
+        for class_name, class_label in (("plus", 1), ("minus", -1)):
+            class_mask = (labels == class_label) & (indicators == 0)
+            selected_class = selected & class_mask
+            class_count = int(class_mask.sum().item())
+            selected_count = int(selected_class.sum().item())
+            error_count = int(
+                (selected_class & (pseudo_label_values != labels)).sum().item()
+            )
+            append(f"unlabeled_count_true_{class_name}", class_count)
+            append(f"selected_count_true_{class_name}", selected_count)
+            append(
+                f"selection_rate_true_{class_name}",
+                selected_count / class_count if class_count else np.nan,
+            )
+            append(
+                f"pseudo_label_error_count_true_{class_name}", error_count
+            )
+            append(
+                f"pseudo_label_error_rate_true_{class_name}",
+                error_count / selected_count if selected_count else np.nan,
+            )
+            append(
+                f"selected_mass_true_{class_name}", selected_count / sample_size
+            )
+            append(
+                f"selected_pseudolabel_plus_true_{class_name}",
+                int((selected_class & (pseudo_label_values == 1)).sum().item()),
+            )
+            append(
+                f"selected_pseudolabel_minus_true_{class_name}",
+                int((selected_class & (pseudo_label_values == -1)).sum().item()),
+            )
+            append(
+                f"mean_unlabeled_score_true_{class_name}",
+                float(scores[class_mask].mean()) if class_count else np.nan,
+            )
+            append(
+                f"mean_selected_score_true_{class_name}",
+                float(scores[selected_class].mean()) if selected_count else np.nan,
+            )
+            append(
+                f"mean_selected_residual_true_{class_name}",
+                (
+                    float(residuals[selected_class].mean())
+                    if selected_count
+                    else np.nan
+                ),
+            )
+        append(
+            "selected_pseudolabel_plus",
+            int((selected & (pseudo_label_values == 1)).sum().item()),
+        )
+        append(
+            "selected_pseudolabel_minus",
+            int((selected & (pseudo_label_values == -1)).sum().item()),
+        )
+
+    if source == "finite":
+        env, finite = run.environment, run.finite
+        if env is None or finite is None:
+            raise ValueError("this run does not contain a finite-gradient trajectory")
+        for step in finite.update_records_:
+            process_update(
+                env.Y,
+                env.Delta,
+                step.g,
+                step.scores,
+                step.selection,
+                step.pseudo_labels,
+                float(step.g.mean()),
+                float(step.chi),
+            )
+    else:
+        se = run.se
+        if se is None:
+            raise ValueError("this run does not contain state evolution")
+        for t in range(run.algo_cfg.n_iterations):
+            residual = se.residual[t]
+            score = se.preactivation[t]
+            if residual is None or score is None:
+                raise RuntimeError("state-evolution trajectory is incomplete")
+            pseudo_label_values = (
+                se.initial_pseudo_label
+                if t == 0
+                else sign_with_positive_tie(score)
+            )
+            selection = se.selection_mask(score, t)
+            process_update(
+                se.label,
+                se.indicator,
+                residual,
+                score,
+                selection,
+                pseudo_label_values,
+                float(se.mean_residual[t]),
+                float(se.label_residual_alignments[t]),
+            )
+
+    result = {
+        key: np.asarray(value)
+        for key, value in update_values.items()
+    }
+    result.update(
+        {
+            "normalized_bias": np.asarray(error_diagnostics["normalized_bias"]),
+            "normalized_alignment": np.asarray(
+                error_diagnostics["normalized_alignment"]
+            ),
+            "optimal_normalized_bias": np.asarray(
+                error_diagnostics["optimal_normalized_bias"]
+            ),
+            "signed_bias_tracking_error": np.asarray(
+                error_diagnostics["signed_bias_tracking_error"]
+            ),
+            "normalized_bias_increment": np.asarray(
+                error_diagnostics["normalized_bias_increment"]
+            ),
+            "optimal_normalized_bias_increment": np.asarray(
+                error_diagnostics["optimal_normalized_bias_increment"]
+            ),
+            "signed_bias_tracking_error_increment": np.asarray(
+                error_diagnostics["signed_bias_tracking_error_increment"]
+            ),
+            "alignment_contribution": np.asarray(
+                error_diagnostics["alignment_contribution"]
+            ),
+            "bias_contribution": np.asarray(
+                error_diagnostics["bias_contribution"]
+            ),
+            "error_increment": np.asarray(error_diagnostics["error_increment"]),
+            "signal_alignment_raw": signal_alignment_raw,
+            "noise_scale": noise_scale,
+            "orthogonal_weight_energy": orthogonal_weight_energy,
+            "orthogonal_to_signal_ratio": orthogonal_to_signal_ratio,
+            "signal_alignment_increment": np.diff(signal_alignment_raw),
+            "orthogonal_weight_energy_increment": np.diff(
+                orthogonal_weight_energy
+            ),
+            "orthogonal_to_signal_ratio_increment": np.diff(
+                orthogonal_to_signal_ratio
+            ),
+            "normalized_alignment_geometry_reconstruction_error": (
+                geometry_identity_error
+            ),
+            "geometry_tolerance": np.asarray(geometry_tolerance),
+        }
+    )
+    return result
 
 
 def trajectory_diagnostics(

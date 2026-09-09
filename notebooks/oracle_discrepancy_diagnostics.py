@@ -86,6 +86,8 @@ def _validate_supported_setting(run: ExperimentRun) -> None:
     if run.finite is None or run.environment is None or run.X is None:
         raise ValueError("the discrepancy diagnostic requires run_finite=True")
     cfg = run.algo_cfg
+    if getattr(cfg, "normalized_threshold", False):
+        raise NotImplementedError("the fixed-boundary certificate does not support normalized thresholds")
     if not math.isclose(run.data_cfg.label_prior, 0.5, abs_tol=1e-12):
         raise ValueError("the current diagnostic is restricted to balanced labels (p=1/2)")
     if not math.isfinite(float(cfg.initial_bias)):
