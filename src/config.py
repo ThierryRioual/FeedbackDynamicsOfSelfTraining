@@ -96,6 +96,7 @@ class AlgorithmConfig:
     bias_pseudo_label_param: Optional[float] = None  # \pi_b; None follows \pi^t
     
     normalized_threshold: bool = False  # Apply thresholds to r / tau (no sigma).
+    normalize_unlabeled_loss: bool = True  # Divide unlabeled selection weights by omega.
 
     # Internal schedule stored as a list of floats
     pseudo_label_param_schedule_: list[float] = field(init=False, default_factory=list)

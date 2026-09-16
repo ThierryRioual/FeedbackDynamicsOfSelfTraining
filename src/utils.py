@@ -33,6 +33,7 @@ def compute_abstract_pseudo_residual_from(
     loss_function,  # Type hinted as your base LossFunction abstract class
     time_index: Optional[int] = None,
     initial_pseudo_label: Optional[torch.Tensor] = None,
+    normalize_unlabeled_loss: bool = True,
 ) -> torch.Tensor:
     """
     Core mathematical engine for computing the pseudo-residual g = -η ∇_r R(r).
@@ -120,6 +121,7 @@ def compute_abstract_pseudo_residual_from(
             eta=eta,
             rho=rho,
             loss_function=loss_function,
+            normalize_unlabeled_loss=normalize_unlabeled_loss,
         )
 
     if time_index == 0:
@@ -165,6 +167,7 @@ def compute_abstract_pseudo_residual_from(
         eta=eta,
         rho=rho,
         loss_function=loss_function,
+        normalize_unlabeled_loss=normalize_unlabeled_loss,
     )
 
 def compute_population_error_from(b: float, m: float, tau: float, sigma: float, p: float) -> float:

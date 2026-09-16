@@ -616,6 +616,7 @@ def make_algorithm_config(
     bias_pseudo_label_param: Optional[float] = None,
     experimental_schedule = None,
     normalized_threshold: bool = False,
+    normalize_unlabeled_loss: bool = True
 ) -> AlgorithmConfig:
     """Create a fixed-pi config unless an explicit experimental schedule is supplied.
 
@@ -637,6 +638,7 @@ def make_algorithm_config(
         bias_pseudo_label_param=bias_pseudo_label_param,
         experimental_schedule=experimental_schedule,
         normalized_threshold=normalized_threshold,
+        normalize_unlabeled_loss=normalize_unlabeled_loss
     )
 
 

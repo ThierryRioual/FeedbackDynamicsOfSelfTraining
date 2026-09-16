@@ -131,6 +131,7 @@ class SelfTrainedGradientDescent:
                 eta=self.cfg.step_size,
                 rho=environment.rho,
                 loss_function=self.cfg.loss_function,
+                normalize_unlabeled_loss=self.cfg.normalize_unlabeled_loss,
             )
             bias_pi = self.cfg.get_bias_pseudo_label_weight(t)
             bias_residual = g if bias_pi == pi else pseudo_residual(
@@ -144,6 +145,7 @@ class SelfTrainedGradientDescent:
                 eta=self.cfg.step_size,
                 rho=environment.rho,
                 loss_function=self.cfg.loss_function,
+                normalize_unlabeled_loss=self.cfg.normalize_unlabeled_loss,
             )
             m = torch.dot(environment.mu, w_current) / environment.d
             chi = torch.dot(environment.Y, g) / environment.n

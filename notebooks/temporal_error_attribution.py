@@ -54,6 +54,7 @@ class TemporalExperimentParameters:
     initial_bias: float = 0.0
     bias_pseudo_label_param: Optional[float] = None
     normalized_threshold: bool = False  # Thresholds apply to r / tau when enabled.
+    normalize_unlabeled_loss: bool = True
 
     def __post_init__(self) -> None:
         symmetric = self.kappa is not None
@@ -95,6 +96,7 @@ def run_temporal_experiment(
         include_bias=parameters.include_bias,
         initial_bias=parameters.initial_bias,
         bias_pseudo_label_param=parameters.bias_pseudo_label_param,
+        normalize_unlabeled_loss=parameters.normalize_unlabeled_loss
     )
     return run_experiment(
         name=parameters.name,

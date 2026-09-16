@@ -13,7 +13,8 @@ def plot_experiment(
     sweep_param_name: Optional[str] = None, 
     sweep_param_values: Optional[List[Any]] = None,
     metric_name: str = "test_error",
-    extra_text: Optional[str] = None  # NEW: Pass custom notes here!
+    extra_text: Optional[str] = None,  # NEW: Pass custom notes here!
+    allow_negative: bool = False,
 ):
     """
     Unified plotting function. Converts incoming PyTorch tensors to NumPy for Matplotlib.
@@ -106,7 +107,8 @@ def plot_experiment(
     axes[0].set_ylabel(formatted_ylabel, fontsize=12)
     
     bottom_ylim, top_ylim = axes[0].get_ylim()
-    axes[0].set_ylim(max(0.0, bottom_ylim), top_ylim)
+    if not allow_negative:
+        axes[0].set_ylim(max(0.0, bottom_ylim), top_ylim)
     
     # Generate the string of fixed parameters
     fixed_str_parts = []

@@ -983,6 +983,7 @@ class MacroscopicStateEvolution:
             loss_function=self.algo_cfg.loss_function,
             time_index=time_index,
             initial_pseudo_label=initial_pseudo_label,
+            normalize_unlabeled_loss=self.algo_cfg.normalize_unlabeled_loss,
         )
 
     def compute_weight_signal_alignment(self, t: int) -> torch.Tensor:

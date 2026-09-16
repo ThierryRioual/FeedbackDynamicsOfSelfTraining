@@ -60,6 +60,7 @@ def pseudo_residual(
     eta: float,
     rho: float,
     loss_function,
+    normalize_unlabeled_loss: bool = True,
 ) -> torch.Tensor:
     """Finite/particle vector ``g=-eta`` times the frozen score gradient."""
 
@@ -67,6 +68,7 @@ def pseudo_residual(
     omega_value = omega.detach().item() if isinstance(omega, torch.Tensor) else float(omega)
     if pi == 0 or rho >= 1 or omega_value <= 0:
         return -eta * labelled
-    unlabeled = ((1 - Delta) * pi / (1 - rho) * normalized_selection(selection, omega)
+    unlabeled_weight = normalized_selection(selection, omega) if normalize_unlabeled_loss else selection
+    unlabeled = ((1 - Delta) * pi / (1 - rho) * unlabeled_weight
                  * loss_function.gradient(scores, Yhat))
     return -eta * (labelled + unlabeled)
